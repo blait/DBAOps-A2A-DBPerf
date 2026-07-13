@@ -17,6 +17,7 @@ Environment=DBAOPS_DATA_DIR=__DATA__
 Environment=DBAOPS_A2A_HOST=0.0.0.0
 Environment=DBAOPS_A2A_PORT=9102
 Environment=DBAOPS_A2A_URL=http://127.0.0.1:9102/
+Environment=PERF_A2A_URL=http://127.0.0.1:9100
 ExecStart=__VENV__/bin/python a2a_server.py
 Restart=always
 RestartSec=3
