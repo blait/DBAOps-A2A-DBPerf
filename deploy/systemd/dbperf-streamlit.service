@@ -13,7 +13,7 @@ Environment=PERF_BEDROCK_MODEL_ID=global.anthropic.claude-sonnet-4-5-20250929-v1
 Environment=PERF_A2A_URL=http://127.0.0.1:9100
 Environment=OPS_A2A_URL=http://127.0.0.1:9102
 Environment=DBAOPS_AGENT_URL=http://127.0.0.1:8080/invocations
-ExecStart=__VENV__/bin/streamlit run streamlit_app.py --server.port=8502 --server.address=0.0.0.0 --server.headless=true
+ExecStart=__VENV__/bin/streamlit run streamlit_app.py --server.port=8502 --server.address=0.0.0.0 --server.headless=true --server.enableCORS=false --server.enableXsrfProtection=false
 Restart=always
 RestartSec=3
 
