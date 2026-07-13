@@ -21,9 +21,8 @@ from a2a.server.agent_execution import AgentExecutor, RequestContext
 from a2a.server.apps import A2AStarletteApplication
 from a2a.server.events import EventQueue
 from a2a.server.request_handlers import DefaultRequestHandler
-from a2a.server.tasks import InMemoryTaskStore
-from a2a.types import AgentCapabilities, AgentCard, AgentSkill
-from a2a.utils import new_agent_text_message
+from a2a.server.tasks import InMemoryTaskStore, TaskUpdater
+from a2a.types import AgentCapabilities, AgentCard, AgentSkill, Part, TextPart
 
 from dbaops_agent.single_graph import invoke_single
 
@@ -72,10 +71,16 @@ class DBAOpsExecutor(AgentExecutor):
         import asyncio
         user_text = context.get_user_input() or ""
         request = _build_request(user_text)
+
+        # Task + artifact 로 응답 — strands A2A client 등 표준 클라이언트가 파싱 가능.
+        updater = TaskUpdater(event_queue, context.task_id, context.context_id)
+        await updater.submit()
+        await updater.start_work()
         # invoke_single 은 동기(LLM/도구 blocking) → 스레드로 오프로드
         result = await asyncio.to_thread(invoke_single, request, recursion_limit=RECURSION_LIMIT)
         answer = _final_text(result)
-        await event_queue.enqueue_event(new_agent_text_message(answer))
+        await updater.add_artifact([Part(root=TextPart(text=answer))], name="dbaops_rca_result")
+        await updater.complete()
 
     async def cancel(self, context: RequestContext, event_queue: EventQueue) -> None:
         # 단발 동기 실행이라 취소 개념 없음 — no-op

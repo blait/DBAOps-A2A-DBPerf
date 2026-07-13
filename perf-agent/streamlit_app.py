@@ -64,21 +64,28 @@ async def _a2a_ask(base_url: str, text: str, context_id: str) -> str:
             message_id=uuid.uuid4().hex,
             context_id=context_id,
         )
+        def _texts_from_parts(parts):
+            out = []
+            for part in (parts or []):
+                root = getattr(part, "root", part)
+                if getattr(root, "text", None):
+                    out.append(root.text)
+            return out
+
         chunks: list[str] = []
         async for event in client.send_message(msg):
-            # 비스트리밍: (Task, update) 튜플 또는 Message
+            # 비스트리밍 응답은 서버 구현에 따라 세 형태로 옴:
+            #  (a) Message 객체 (DBAOps native: new_agent_text_message)
+            #  (b) (Task, update) 튜플 — artifacts 또는 status.message 에 텍스트
             if isinstance(event, tuple):
                 task = event[0]
                 for artifact in (getattr(task, "artifacts", None) or []):
-                    for part in (artifact.parts or []):
-                        root = getattr(part, "root", part)
-                        if getattr(root, "text", None):
-                            chunks.append(root.text)
+                    chunks += _texts_from_parts(getattr(artifact, "parts", None))
+                status = getattr(task, "status", None)
+                if status and getattr(status, "message", None):
+                    chunks += _texts_from_parts(getattr(status.message, "parts", None))
             else:
-                for part in (getattr(event, "parts", None) or []):
-                    root = getattr(part, "root", part)
-                    if getattr(root, "text", None):
-                        chunks.append(root.text)
+                chunks += _texts_from_parts(getattr(event, "parts", None))
         return "\n".join(chunks) or "(빈 응답)"
 
 
