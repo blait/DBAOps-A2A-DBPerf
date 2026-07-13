@@ -5,11 +5,11 @@ Spawns mcp_query_tools.py as a child process and talks to it over stdio MCP —
 no AgentCore Gateway, no Lambda. Everything runs in this container/box.
 
 build_mcp_client() / build_perf_agent() are reused by:
-  - a2a_perf_server.py  (A2A server on :9000)
+  - a2a_perf_server.py  (A2A server on :9100)
   - CLI interactive mode (python3.11 query_agent.py)
 
 If ENABLE_A2A=1 (default), the agent also gets A2A client tools so it can
-consult the DBAOps ops agent facade at OPS_A2A_URL (:9001).
+consult the DBAOps ops agent facade at OPS_A2A_URL (:9101).
 """
 import os
 import sys
@@ -21,7 +21,7 @@ from mcp import StdioServerParameters, stdio_client
 
 AWS_REGION = os.environ.get('AWS_REGION', 'ap-northeast-2')
 BEDROCK_MODEL_ID = os.environ.get('BEDROCK_MODEL_ID', 'global.anthropic.claude-sonnet-4-5-20250929-v1:0')
-OPS_A2A_URL = os.environ.get('OPS_A2A_URL', 'http://127.0.0.1:9001')
+OPS_A2A_URL = os.environ.get('OPS_A2A_URL', 'http://127.0.0.1:9101')
 ENABLE_A2A = os.environ.get('ENABLE_A2A', '1') == '1'
 
 SERVER_SCRIPT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "mcp_query_tools.py")

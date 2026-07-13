@@ -4,8 +4,8 @@ connections.py - 연동 서비스 관리.
 이 에이전트 스택이 연결되는 외부 서비스들의 상태 확인 / 설정 / 테스트를 한 곳에서 처리:
   - RDS SQL Server (Secrets Manager 자격증명)
   - Slack (Bot Token — 기존 DBAOps slack-bot과 동일한 토큰 방식)
-  - DBAOps Agent (ec2-allinone agent 컨테이너, HTTP)
-  - A2A peer 서버들 (performance :9000 / dbaops facade :9001)
+  - DBAOps Agent (vanilla systemd, 127.0.0.1:8080 HTTP)
+  - A2A peer 서버들 (performance :9100 / dbaops facade :9101)
 
 Slack은 webhook이 아니라 **Bot Token(xoxb-…) + chat.postMessage** 방식.
 토큰은 환경변수 SLACK_BOT_TOKEN(권장, .env → compose) 또는
@@ -32,11 +32,11 @@ SLACK_BOT_TOKEN = os.environ.get('SLACK_BOT_TOKEN', '')
 SLACK_BOT_TOKEN_PARAM = os.environ.get('SLACK_BOT_TOKEN_PARAM', '/dbops/slack/bot_token')
 SLACK_CHANNEL = os.environ.get('SLACK_CHANNEL', '')  # 알림 기본 채널 (예: #dbops-alerts 또는 C0123…)
 
-# DBAOps ec2-allinone agent (HTTP)
-DBAOPS_AGENT_URL = os.environ.get('DBAOPS_AGENT_URL', 'http://agent:8080/invocations')
+# DBAOps agent (vanilla systemd, HTTP)
+DBAOPS_AGENT_URL = os.environ.get('DBAOPS_AGENT_URL', 'http://127.0.0.1:8080/invocations')
 
-PERF_A2A_URL = os.environ.get('PERF_A2A_URL', 'http://127.0.0.1:9000')
-OPS_A2A_URL = os.environ.get('OPS_A2A_URL', 'http://127.0.0.1:9001')
+PERF_A2A_URL = os.environ.get('PERF_A2A_URL', 'http://127.0.0.1:9100')
+OPS_A2A_URL = os.environ.get('OPS_A2A_URL', 'http://127.0.0.1:9101')
 
 
 # ───────────────────────── Slack (Bot Token) ─────────────────────────
@@ -116,7 +116,7 @@ def check_slack() -> dict:
 
 
 def check_dbaops_agent() -> dict:
-    """DBAOps ec2-allinone agent 컨테이너 헬스 확인 (/ping)."""
+    """DBAOps agent 헬스 확인 (/ping)."""
     base = DBAOPS_AGENT_URL.rsplit('/', 1)[0]  # …:8080
     for path in ('/ping', '/healthz'):
         try:

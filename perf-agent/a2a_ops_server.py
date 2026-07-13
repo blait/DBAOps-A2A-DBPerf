@@ -1,14 +1,14 @@
 """
-a2a_ops_server.py - DBAOps Agent(ec2-allinone)를 A2A 프로토콜로 노출하는 파사드 (:9001).
+a2a_ops_server.py - DBAOps Agent(vanilla systemd)를 A2A 프로토콜로 노출하는 파사드 (:9101).
 
-DBAOps-Agent ec2-allinone의 agent 컨테이너는 :8080/invocations HTTP만 말하고
+DBAOps-Agent DBAOps agent(vanilla systemd)는 127.0.0.1:8080/invocations HTTP만 말하고
 A2A를 모른다. 이 파사드가 A2A 요청을 받아 HTTP(mode=single)로 변환해 주고,
 응답의 최종 분석 텍스트를 돌려준다.
 
-또한 파사드 에이전트는 perf A2A 서버(:9000) client 도구도 가져서, DBAOps 쪽 질문에
+또한 파사드 에이전트는 perf A2A 서버(:9100) client 도구도 가져서, DBAOps 쪽 질문에
 SQL Server 컨텍스트가 필요하면 반대 방향(ops → perf)으로도 물어볼 수 있다.
 
-Agent card: http://<host>:9001/.well-known/agent-card.json
+Agent card: http://<host>:9101/.well-known/agent-card.json
 
 Run:  python3 a2a_ops_server.py
 """
@@ -25,19 +25,19 @@ from strands.multiagent.a2a import A2AServer
 AWS_REGION = os.environ.get('AWS_REGION', 'ap-northeast-2')
 BEDROCK_MODEL_ID = os.environ.get('BEDROCK_MODEL_ID', 'global.anthropic.claude-sonnet-4-5-20250929-v1:0')
 
-# DBAOps ec2-allinone agent 컨테이너 (같은 compose 네트워크면 http://agent:8080/invocations)
-DBAOPS_AGENT_URL = os.environ.get('DBAOPS_AGENT_URL', 'http://agent:8080/invocations')
+# DBAOps agent (같은 호스트면 http://127.0.0.1:8080/invocations)
+DBAOPS_AGENT_URL = os.environ.get('DBAOPS_AGENT_URL', 'http://127.0.0.1:8080/invocations')
 DBAOPS_TIMEOUT = int(os.environ.get('DBAOPS_TIMEOUT', '840'))
 
 HOST = os.environ.get('A2A_OPS_HOST', '0.0.0.0')
-PORT = int(os.environ.get('A2A_OPS_PORT', '9001'))
+PORT = int(os.environ.get('A2A_OPS_PORT', '9101'))
 HTTP_URL = os.environ.get('A2A_OPS_URL', f"http://127.0.0.1:{PORT}")
-PERF_A2A_URL = os.environ.get('PERF_A2A_URL', 'http://127.0.0.1:9000')
+PERF_A2A_URL = os.environ.get('PERF_A2A_URL', 'http://127.0.0.1:9100')
 
 
 @tool
 def ask_dbaops_agent(question: str, hours_back: int = 1) -> Dict[str, Any]:
-    """Ask the DBAOps RCA analyst (ec2-allinone agent) about OS/infra metrics,
+    """Ask the DBAOps RCA analyst about OS/infra metrics,
     Aurora PostgreSQL, RDS MySQL, Kafka(MSK) or logs. Korean questions work best.
     hours_back sets the analysis time window (default: last 1 hour)."""
     from datetime import datetime, timedelta, timezone
@@ -110,7 +110,7 @@ def build_ops_facade_agent() -> Agent:
     model = BedrockModel(model_id=BEDROCK_MODEL_ID, region_name=AWS_REGION, temperature=0.3)
     return Agent(
         name="DBAOps Ops Agent (A2A facade)",
-        description=("Facade for the DBAOps RCA analyst (ec2-allinone): OS/infra "
+        description=("Facade for the DBAOps RCA analyst: OS/infra "
                      "metrics, Aurora PostgreSQL, RDS MySQL, Kafka(MSK), log analysis. "
                      "Can also consult the SQL Server Query Performance Agent over A2A."),
         system_prompt=SYSTEM_PROMPT,

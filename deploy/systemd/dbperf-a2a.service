@@ -1,0 +1,21 @@
+# SQL Server Perf Agent — A2A 서버 (:9100). install.sh 가 __PLACEHOLDER__ 치환.
+[Unit]
+Description=DBPerf A2A server (SQL Server query performance)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=__USER__
+WorkingDirectory=__PERF__
+EnvironmentFile=/etc/dbaops/dbaops.env
+Environment=A2A_PERF_HOST=0.0.0.0
+Environment=A2A_PERF_PORT=9100
+Environment=A2A_PERF_URL=http://127.0.0.1:9100
+Environment=OPS_A2A_URL=http://127.0.0.1:9101
+ExecStart=__VENV__/bin/python a2a_perf_server.py
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
