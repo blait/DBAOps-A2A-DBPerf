@@ -9,6 +9,7 @@ Type=simple
 User=__USER__
 WorkingDirectory=__PERF__
 EnvironmentFile=/etc/dbaops/dbaops.env
+Environment=PERF_BEDROCK_MODEL_ID=global.anthropic.claude-sonnet-4-5-20250929-v1:0
 Environment=PERF_A2A_URL=http://127.0.0.1:9100
 Environment=OPS_A2A_URL=http://127.0.0.1:9101
 Environment=DBAOPS_AGENT_URL=http://127.0.0.1:8080/invocations

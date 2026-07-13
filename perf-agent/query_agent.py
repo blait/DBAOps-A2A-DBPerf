@@ -20,9 +20,21 @@ from strands.tools.mcp.mcp_client import MCPClient
 from mcp import StdioServerParameters, stdio_client
 
 AWS_REGION = os.environ.get('AWS_REGION', 'ap-northeast-2')
-BEDROCK_MODEL_ID = os.environ.get('BEDROCK_MODEL_ID', 'global.anthropic.claude-sonnet-4-5-20250929-v1:0')
+# perf 전용 모델(PERF_BEDROCK_MODEL_ID) 우선 — DBAOps의 BEDROCK_MODEL_ID(opus)와 분리.
+BEDROCK_MODEL_ID = os.environ.get('PERF_BEDROCK_MODEL_ID') or os.environ.get(
+    'BEDROCK_MODEL_ID', 'global.anthropic.claude-sonnet-4-5-20250929-v1:0')
 OPS_A2A_URL = os.environ.get('OPS_A2A_URL', 'http://127.0.0.1:9101')
 ENABLE_A2A = os.environ.get('ENABLE_A2A', '1') == '1'
+
+
+def model_kwargs() -> dict:
+    """BedrockModel 인자. temperature는 일부 신모델(opus-4-7 등)이 거부하므로
+    BEDROCK_TEMPERATURE env가 있을 때만 넣는다(기본 미지정)."""
+    kw = {"model_id": BEDROCK_MODEL_ID, "region_name": AWS_REGION}
+    t = os.environ.get("BEDROCK_TEMPERATURE")
+    if t:
+        kw["temperature"] = float(t)
+    return kw
 
 SERVER_SCRIPT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "mcp_query_tools.py")
 
@@ -118,11 +130,7 @@ def build_perf_agent(mcp_client: MCPClient, with_a2a: bool = ENABLE_A2A) -> Agen
         except Exception as e:
             print(f"[warn] A2A client tools unavailable: {e}", file=sys.stderr)
 
-    model = BedrockModel(
-        model_id=BEDROCK_MODEL_ID,
-        region_name=AWS_REGION,
-        temperature=0.3,
-    )
+    model = BedrockModel(**model_kwargs())
     return Agent(
         name="SQL Server Query Performance Agent",
         description=("RDS SQL Server query performance specialist: Query Store analysis, "

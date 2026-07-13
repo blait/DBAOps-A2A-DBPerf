@@ -22,8 +22,9 @@ from strands import Agent, tool
 from strands.models import BedrockModel
 from strands.multiagent.a2a import A2AServer
 
+from query_agent import model_kwargs
+
 AWS_REGION = os.environ.get('AWS_REGION', 'ap-northeast-2')
-BEDROCK_MODEL_ID = os.environ.get('BEDROCK_MODEL_ID', 'global.anthropic.claude-sonnet-4-5-20250929-v1:0')
 
 # DBAOps agent (같은 호스트면 http://127.0.0.1:8080/invocations)
 DBAOPS_AGENT_URL = os.environ.get('DBAOPS_AGENT_URL', 'http://127.0.0.1:8080/invocations')
@@ -107,7 +108,7 @@ def build_ops_facade_agent() -> Agent:
     except Exception as e:
         print(f"[warn] A2A client tools unavailable: {e}", file=sys.stderr)
 
-    model = BedrockModel(model_id=BEDROCK_MODEL_ID, region_name=AWS_REGION, temperature=0.3)
+    model = BedrockModel(**model_kwargs())
     return Agent(
         name="DBAOps Ops Agent (A2A facade)",
         description=("Facade for the DBAOps RCA analyst: OS/infra "
