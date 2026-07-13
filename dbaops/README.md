@@ -110,7 +110,7 @@ docker compose down -v                   # 종료 + 연결설정 초기화
 ## PoC (testbed 포함 환경)
 
 시나리오 generator + Aurora/MySQL/MSK 를 직접 생성하는 전체 testbed 구축:
-[`docs/POC_QUICKSTART.md`](docs/POC_QUICKSTART.md) (Terraform 기반, 25단계).
+(제거됨 — 옛 AgentCore/Terraform 아키텍처 가이드)
 
 ---
 

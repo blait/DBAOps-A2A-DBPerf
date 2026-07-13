@@ -448,7 +448,6 @@ docker compose restart mcp-router
 | [`deploy/ec2-allinone/SLACK_SETUP.md`](../deploy/ec2-allinone/SLACK_SETUP.md) | Slack 앱 생성 상세 |
 | [`docs/CONNECTION_INFO.md`](CONNECTION_INFO.md) | 연결 정보가 어디서 오는지 (자동탐색 vs 수동) |
 | [`docs/SERVICE_GUIDE.md`](SERVICE_GUIDE.md) | 시스템 내부 상세 (코드 레벨) |
-| [`docs/POC_QUICKSTART.md`](POC_QUICKSTART.md) | PoC testbed 전체 구축 (Terraform) |
 | [`docs/iam/IAM_APPLY_GUIDE.md`](iam/IAM_APPLY_GUIDE.md) | IAM 권한 부여 절차 |
 
 ---
