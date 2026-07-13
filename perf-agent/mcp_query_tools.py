@@ -352,10 +352,11 @@ def get_query_plan(target: str = "", query_fragment: str = "") -> Dict[str, Any]
         stmts = run_query(target, f"""
             SELECT query FROM pg_stat_statements
             WHERE query ILIKE '%{safe}%' AND query NOT ILIKE '%pg_stat_statements%'
+              AND query NOT ILIKE 'EXPLAIN%' AND lower(query) LIKE 'select%'
             ORDER BY total_exec_time DESC LIMIT 1""")
         if not stmts:
             return {"engine": eng, "plans": [], "count": 0,
-                    "note": f"'{query_fragment}' 매칭 쿼리가 pg_stat_statements에 없음"}
+                    "note": f"'{query_fragment}' 매칭 SELECT 쿼리가 pg_stat_statements에 없음"}
         q = stmts[0]["query"]
         if "$1" in q:
             return {"engine": eng, "matched_query": q[:500], "plans": [],
