@@ -32,7 +32,7 @@ a2a-sdk로 직접 감싼 서버로, 원본 `dbaops_agent` 패키지는 수정하
 | 디렉토리 | 내용 |
 |---|---|
 | `dbaops/` | [blait/DBAOps-Agent](https://github.com/blait/DBAOps-Agent) `feat/ec2-allinone-slack` 스냅샷. **vanilla(venv+systemd, docker 불필요)** 배포 경로 포함. 원본 레포는 무수정 |
-| `perf-agent/` | SQL Server 쿼리 성능 에이전트 (Strands + stdio MCP 도구 13개) + A2A 서버 + Streamlit |
+| `perf-agent/` | SQL Server 쿼리 성능 에이전트 (**LangGraph** analyze→validate→report 파이프라인 + stdio MCP 도구 13개) + A2A 서버 + Streamlit |
 | `deploy/` | 통합 `install.sh` / `update.sh` + systemd 유닛(dbaops-a2a + perf 2개) |
 
 ## Quick start (docker 없음)

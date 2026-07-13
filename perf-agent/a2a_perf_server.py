@@ -1,27 +1,64 @@
 """
-a2a_perf_server.py - Query Performance 에이전트를 A2A 프로토콜로 노출 (:9100).
+a2a_perf_server.py - LangGraph 기반 Query Performance 에이전트를 A2A로 노출 (:9100).
 
-DBAOps RCA agent(native A2A :9102)나 다른 A2A 클라이언트가 이 서버로
-SQL Server 쿼리 성능 질문을 보낼 수 있다.
+Strands A2AServer 대신 a2a-sdk 직접 구현 (dbaops/a2a_server.py와 동일 패턴).
+- MCP stdio 세션(mcp_query_tools.py)은 서버 기동 시 열어 프로세스 수명 동안 상주
+- A2A context_id → LangGraph thread_id 매핑으로 대화 연속성 유지
+- Task + artifact 형태 응답 (peer/strands/사내 클라이언트 모두 파싱 가능)
 
 Agent card: http://<host>:9100/.well-known/agent-card.json
-
-Run:  python3.11 a2a_perf_server.py
+Run:  python a2a_perf_server.py
 """
+from __future__ import annotations
+
+import asyncio
+import contextlib
+import logging
 import os
+import sys
 
-from a2a.types import AgentSkill
-from strands.multiagent.a2a import A2AServer
+import uvicorn
+from a2a.server.agent_execution import AgentExecutor, RequestContext
+from a2a.server.apps import A2AStarletteApplication
+from a2a.server.events import EventQueue
+from a2a.server.request_handlers import DefaultRequestHandler
+from a2a.server.tasks import InMemoryTaskStore, TaskUpdater
+from a2a.types import AgentCapabilities, AgentCard, AgentSkill, Part, TextPart
+from mcp import ClientSession, StdioServerParameters, stdio_client
 
-from query_agent import build_mcp_client, build_perf_agent
+import perf_graph
 
-HOST = os.environ.get('A2A_PERF_HOST', '0.0.0.0')
-PORT = int(os.environ.get('A2A_PERF_PORT', '9100'))
-# agent card에 실릴 접근 URL (peer가 접근할 주소)
-HTTP_URL = os.environ.get('A2A_PERF_URL', f"http://127.0.0.1:{PORT}")
+logging.basicConfig(level=os.environ.get("LOG_LEVEL", "INFO"))
+logger = logging.getLogger("perf-a2a")
 
-# 카드에 광고할 대표 스킬 — 내부 도구 14개를 그대로 노출하지 않고 큐레이션.
-# (특히 ask_dbaops_agent 같은 peer 위임 도구는 외부에 광고하면 경유/루프 오해 소지)
+HOST = os.environ.get("A2A_PERF_HOST", "0.0.0.0")
+PORT = int(os.environ.get("A2A_PERF_PORT", "9100"))
+PUBLIC_URL = os.environ.get("A2A_PERF_URL", f"http://127.0.0.1:{PORT}/")
+
+_GRAPH = None          # 기동 시 build_graph 결과
+_READY = asyncio.Event()
+
+
+class PerfExecutor(AgentExecutor):
+    async def execute(self, context: RequestContext, event_queue: EventQueue) -> None:
+        updater = TaskUpdater(event_queue, context.task_id, context.context_id)
+        await updater.submit()
+        await updater.start_work()
+        try:
+            await asyncio.wait_for(_READY.wait(), timeout=30)
+            user_text = context.get_user_input() or ""
+            thread = context.context_id or "default"
+            answer = await perf_graph.run_perf(_GRAPH, user_text, thread_id=thread)
+        except Exception as e:  # noqa: BLE001
+            logger.exception("perf graph failed")
+            answer = f"[perf error] {e}"
+        await updater.add_artifact([Part(root=TextPart(text=answer))], name="perf_result")
+        await updater.complete()
+
+    async def cancel(self, context: RequestContext, event_queue: EventQueue) -> None:
+        return
+
+
 CARD_SKILLS = [
     AgentSkill(
         id="sqlserver_query_performance",
@@ -30,7 +67,8 @@ CARD_SKILLS = [
             "RDS SQL Server query performance diagnosis and tuning: Query Store "
             "historical analysis, regression detection, currently running slow "
             "queries, blocking sessions, execution plans, and missing/unused "
-            "index recommendations with CREATE INDEX statements."
+            "index recommendations with CREATE INDEX statements. "
+            "LangGraph pipeline: analyze → validate → (revise) → report."
         ),
         tags=["sqlserver", "rds", "query-store", "dmv", "performance", "index-tuning", "blocking"],
         examples=[
@@ -43,26 +81,55 @@ CARD_SKILLS = [
 ]
 
 
+def build_agent_card() -> AgentCard:
+    return AgentCard(
+        name="SQL Server Query Performance Agent",
+        description=("RDS SQL Server query performance specialist: Query Store analysis, "
+                     "regression detection, blocking sessions, execution plans, index "
+                     "tuning. LangGraph-based (analyze→validate→report)."),
+        url=PUBLIC_URL,
+        version="2.0.0",
+        default_input_modes=["text"],
+        default_output_modes=["text"],
+        capabilities=AgentCapabilities(streaming=False),
+        skills=CARD_SKILLS,
+    )
+
+
+async def _startup() -> None:
+    """MCP stdio 세션을 열고 그래프를 빌드 — 프로세스 수명 동안 유지."""
+    global _GRAPH
+    params = StdioServerParameters(command=sys.executable,
+                                   args=[perf_graph.SERVER_SCRIPT],
+                                   env={**os.environ})
+    stack = contextlib.AsyncExitStack()
+    read, write = await stack.enter_async_context(stdio_client(params))
+    session = await stack.enter_async_context(ClientSession(read, write))
+    await session.initialize()
+    tools = await perf_graph.load_perf_tools(session)
+    _GRAPH = perf_graph.build_graph(tools)
+    _READY.set()
+    logger.info("perf graph ready — %d tools (validation=%s)",
+                len(tools), perf_graph.ENABLE_VALIDATION)
+    # stack은 close하지 않음 — 세션이 서버 수명 동안 상주 (프로세스 종료 시 정리)
+
+
+@contextlib.asynccontextmanager
+async def _lifespan(app):  # noqa: ANN001
+    task = asyncio.get_running_loop().create_task(_startup())
+    yield
+    task.cancel()
+
+
 def main():
-    mcp_client = build_mcp_client()
-    with mcp_client:
-        # 양방향 A2A: 이 서버의 에이전트도 DBAOps native A2A(:9102)에 물어볼 수 있다.
-        # 무한 위임 루프는 시스템 프롬프트의 역할 경계로 방지 —
-        # perf는 SQL Server 질문을 절대 위임하지 않고, ops는 SQL Server 컨텍스트만 위임한다.
-        agent = build_perf_agent(mcp_client)
-        server = A2AServer(
-            agent=agent,
-            host=HOST,
-            port=PORT,
-            http_url=HTTP_URL,
-            serve_at_root=True,
-            version="1.0.0",
-            skills=CARD_SKILLS,
-            # 스트리밍 응답을 A2A 스펙에 맞게 (Strands 기본값은 비준수 — 자체 경고 로그 있음)
-            enable_a2a_compliant_streaming=True,
-        )
-        print(f"Query Performance A2A server on {HOST}:{PORT} (card url: {HTTP_URL})")
-        server.serve()
+    handler = DefaultRequestHandler(agent_executor=PerfExecutor(),
+                                    task_store=InMemoryTaskStore())
+    app = A2AStarletteApplication(agent_card=build_agent_card(),
+                                  http_handler=handler).build(lifespan=_lifespan)
+
+    print(f"Query Performance A2A server (LangGraph) on {HOST}:{PORT} (card url: {PUBLIC_URL})")
+    uvicorn.run(app, host=HOST, port=PORT,
+                log_level=os.environ.get("LOG_LEVEL", "info").lower())
 
 
 if __name__ == "__main__":
