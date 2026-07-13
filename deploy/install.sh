@@ -48,6 +48,8 @@ if ! sudo grep -q '^DB_SECRET_ID=' "$ENV_FILE" 2>/dev/null; then
 PERF_BEDROCK_MODEL_ID=global.anthropic.claude-sonnet-4-5-20250929-v1:0
 DB_SECRET_ID=dbops-sqlserver-secret
 DB_NAME=master
+# 멀티엔진 타깃 (JSON 한 줄) — 예시. 실제 값으로 수정
+#DB_TARGETS=[{"name":"mssql-main","engine":"mssql","secret_id":"dbops-sqlserver-secret","database":"master"},{"name":"pg-test","engine":"postgres","secret_id":"dbperf-pg-test-secret","database":"appdb","sslmode":"require"}]
 # Slack 알림 기본 채널 (bot token 은 위 SLACK_BOT_TOKEN 재사용)
 #SLACK_CHANNEL=#dbops-alerts
 PERFENV

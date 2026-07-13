@@ -1,435 +1,474 @@
 """
-mcp_query_tools.py - stdio MCP server exposing 13 Query Performance tools.
+mcp_query_tools.py - stdio MCP 서버: 쿼리 성능 진단 도구 (멀티엔진).
 
-Ported from autonomous-dbops/gateway/lambda_query_tools.py (AgentCore Gateway
-Lambda version) to a plain stdio MCP server for EC2 deployment.
+논리 도구는 하나의 세트, 내부 구현만 DB 엔진별(dialect)로 분기한다:
+  - mssql    : Query Store + DMV (sys.query_store_*, sys.dm_exec_*)
+  - postgres : pg_stat_statements + pg_stat_activity/pg_locks/EXPLAIN
 
-Uses pymssql for direct DB queries (Query Store + DMVs).
-Credentials come from Secrets Manager at call time; nothing is cached on disk.
+모든 진단 도구는 target 파라미터(기본: 첫 번째 타깃)로 대상 DB를 고른다.
+타깃 정의는 db_targets.py(DB_TARGETS env) 참고. list_db_targets로 조회.
 
-Run:  python3.11 mcp_query_tools.py   (spawned by an MCP client over stdio)
+엔진별 미지원 기능(예: PG의 시간구간 이력)은 에러 대신
+{"unsupported": ..., "hint": ...}로 안내를 반환한다 — LLM이 사용자에게 설명 가능.
 """
-import boto3
-import pymssql
 import json
 import os
-from typing import Dict, Any
+from typing import Any, Dict
 
 from mcp.server.fastmcp import FastMCP
 
-# Configuration from environment variables
+import db_targets
+from db_targets import engine_of, run_query
+
 AWS_REGION = os.environ.get('AWS_REGION', 'ap-northeast-2')
-DB_SECRET_ID = os.environ.get('DB_SECRET_ID', 'dbops-sqlserver-secret')
-DB_INSTANCE_ID = os.environ.get('DB_INSTANCE_ID', 'sql-server-instance')
-DB_NAME = os.environ.get('DB_NAME', 'master')
 
-mcp = FastMCP("dbops-query-tools")
+mcp = FastMCP("dbperf-query-tools")
 
 
-# ===== HELPER FUNCTIONS =====
-
-def get_db_connection():
-    """Get database connection using credentials from Secrets Manager"""
-    try:
-        secrets_client = boto3.client('secretsmanager', region_name=AWS_REGION)
-        secret = secrets_client.get_secret_value(SecretId=DB_SECRET_ID)
-        creds = json.loads(secret['SecretString'])
-
-        conn = pymssql.connect(
-            server=creds['host'],
-            user=creds['username'],
-            password=creds['password'],
-            port=creds.get('port', 1433),
-            database=DB_NAME
-        )
-        return conn
-    except Exception as e:
-        raise Exception(f"Error connecting to database: {str(e)}")
+def _t(target: str) -> str:
+    return target or db_targets.default_target()
 
 
-def run_query(query: str) -> list:
-    """Execute a query and return rows as list of dicts."""
-    conn = get_db_connection()
-    cursor = conn.cursor()
-    cursor.execute(query)
-    columns = [desc[0] for desc in cursor.description]
-    results = [dict(zip(columns, row)) for row in cursor.fetchall()]
-    cursor.close()
-    conn.close()
-    return results
+def _unsupported(feature: str, hint: str) -> Dict[str, Any]:
+    return {"unsupported": feature, "hint": hint}
 
 
-# ===== QUERY STORE TOOLS =====
+# ═══════════════════════ 타깃 조회 ═══════════════════════
 
 @mcp.tool()
-def check_query_store_enabled() -> Dict[str, Any]:
-    """Check if Query Store is enabled and get configuration"""
+def list_db_targets() -> Dict[str, Any]:
+    """List registered database targets (name, engine, host, database).
+    Call this first when unsure which 'target' value to pass to other tools."""
+    return {"targets": db_targets.describe_targets(),
+            "default": db_targets.default_target()}
+
+
+# ═══════════════════════ 이력/저장소 상태 ═══════════════════════
+
+@mcp.tool()
+def check_query_store_enabled(target: str = "") -> Dict[str, Any]:
+    """Check if the query history store is enabled — Query Store (mssql) or
+    pg_stat_statements extension (postgres) — and return its configuration."""
+    target = _t(target)
     try:
-        rows = run_query("""
-            SELECT
-                actual_state_desc,
-                readonly_reason,
-                desired_state_desc,
-                current_storage_size_mb,
-                max_storage_size_mb,
-                query_capture_mode_desc
-            FROM sys.database_query_store_options
-        """)
+        eng = engine_of(target)
+        if eng == "mssql":
+            rows = run_query(target, """
+                SELECT actual_state_desc, readonly_reason, desired_state_desc,
+                       current_storage_size_mb, max_storage_size_mb, query_capture_mode_desc
+                FROM sys.database_query_store_options""")
+            if rows:
+                r = rows[0]
+                return {"engine": eng, "enabled": r["actual_state_desc"] in ("READ_WRITE", "READ_ONLY"),
+                        "state": r["actual_state_desc"], "capture_mode": r["query_capture_mode_desc"],
+                        "storage_used_mb": r["current_storage_size_mb"],
+                        "storage_max_mb": r["max_storage_size_mb"]}
+            return {"engine": eng, "enabled": False, "error": "Query Store not configured"}
+        # postgres
+        rows = run_query(target, "SELECT extname, extversion FROM pg_extension WHERE extname='pg_stat_statements'")
         if rows:
-            row = rows[0]
-            return {
-                'enabled': row['actual_state_desc'] in ('READ_WRITE', 'READ_ONLY'),
-                'state': row['actual_state_desc'],
-                'readonly_reason': row['readonly_reason'],
-                'desired_state': row['desired_state_desc'],
-                'storage_used_mb': row['current_storage_size_mb'],
-                'storage_max_mb': row['max_storage_size_mb'],
-                'capture_mode': row['query_capture_mode_desc'],
-                'database': DB_NAME
-            }
-        return {'enabled': False, 'error': 'Query Store not configured', 'database': DB_NAME}
+            cfg = run_query(target, "SHOW pg_stat_statements.max")
+            return {"engine": eng, "enabled": True, "extension": "pg_stat_statements",
+                    "version": rows[0]["extversion"], "max_statements": cfg[0].get("pg_stat_statements.max") if cfg else None}
+        avail = run_query(target, "SELECT name FROM pg_available_extensions WHERE name='pg_stat_statements'")
+        return {"engine": eng, "enabled": False,
+                "hint": "CREATE EXTENSION pg_stat_statements; (shared_preload_libraries 필요)" if avail
+                        else "pg_stat_statements 확장이 설치돼 있지 않음"}
     except Exception as e:
-        return {'enabled': False, 'error': str(e)}
+        return {"enabled": False, "error": str(e)[:400]}
+
+
+# ═══════════════════════ 상위/비싼 쿼리 ═══════════════════════
+
+_MSSQL_TOP_STORE = """
+SELECT TOP {n}
+    qsq.query_id,
+    SUBSTRING(CAST(qst.query_sql_text AS NVARCHAR(MAX)), 1, 500) as query_text,
+    qrs.avg_cpu_time / 1000 as avg_cpu_ms,
+    qrs.avg_duration / 1000 as avg_duration_ms,
+    qrs.avg_logical_io_reads as avg_reads,
+    qrs.count_executions as calls,
+    qrs.last_execution_time
+FROM sys.query_store_query qsq
+JOIN sys.query_store_query_text qst ON qsq.query_text_id = qst.query_text_id
+JOIN sys.query_store_plan qp ON qsq.query_id = qp.query_id
+JOIN sys.query_store_runtime_stats qrs ON qp.plan_id = qrs.plan_id
+JOIN sys.query_store_runtime_stats_interval qrsi ON qrs.runtime_stats_interval_id = qrsi.runtime_stats_interval_id
+WHERE qrsi.start_time >= DATEADD(hour, -{hours}, GETUTCDATE())
+ORDER BY {order}
+"""
+
+_MSSQL_TOP_CACHE = """
+SELECT TOP {n}
+    SUBSTRING(st.text, 1, 500) as query_text,
+    qs.execution_count as calls,
+    qs.total_worker_time / 1000 as total_cpu_ms,
+    qs.total_elapsed_time / 1000 as total_duration_ms,
+    qs.total_logical_reads as total_reads,
+    qs.last_execution_time
+FROM sys.dm_exec_query_stats qs
+CROSS APPLY sys.dm_exec_sql_text(qs.sql_handle) st
+ORDER BY {order}
+"""
+
+_PG_TOP = """
+SELECT queryid::text as query_id,
+       LEFT(query, 500) as query_text,
+       ROUND((total_exec_time / NULLIF(calls,0))::numeric, 2) as avg_cpu_ms,
+       ROUND((total_exec_time / NULLIF(calls,0))::numeric, 2) as avg_duration_ms,
+       ROUND((shared_blks_hit + shared_blks_read) / NULLIF(calls,0)::numeric, 1) as avg_reads,
+       calls,
+       ROUND(total_exec_time::numeric, 1) as total_duration_ms
+FROM pg_stat_statements
+WHERE query NOT ILIKE '%%pg_stat_statements%%'
+ORDER BY {order}
+LIMIT {n}
+"""
 
 
 @mcp.tool()
-def get_query_store_top_queries(hours_back: int = 24, top_n: int = 10, metric: str = "cpu") -> Dict[str, Any]:
-    """Get top resource-consuming queries from Query Store. Metric: cpu, duration, io, memory"""
+def get_top_queries(target: str = "", hours_back: int = 24, top_n: int = 10,
+                    metric: str = "cpu") -> Dict[str, Any]:
+    """Get top resource-consuming queries. Metric: cpu, duration, io.
+    mssql: Query Store windowed by hours_back (falls back to plan cache if QS off).
+    postgres: pg_stat_statements cumulative stats (hours_back not applicable)."""
+    target = _t(target)
     try:
-        order_by = {
-            "cpu": "qrs.avg_cpu_time DESC",
-            "duration": "qrs.avg_duration DESC",
-            "io": "qrs.avg_logical_io_reads DESC",
-            "memory": "qrs.avg_query_max_used_memory DESC"
-        }.get(metric, "qrs.avg_cpu_time DESC")
-
-        results = run_query(f"""
-        SELECT TOP {int(top_n)}
-            qsq.query_id,
-            SUBSTRING(CAST(qst.query_sql_text AS NVARCHAR(MAX)), 1, 500) as query_text,
-            qrs.avg_cpu_time / 1000 as avg_cpu_ms,
-            qrs.avg_duration / 1000 as avg_duration_ms,
-            qrs.avg_logical_io_reads,
-            qrs.avg_query_max_used_memory * 8 / 1024 as avg_memory_mb,
-            qrs.count_executions,
-            qrs.last_execution_time
-        FROM sys.query_store_query qsq
-        JOIN sys.query_store_query_text qst ON qsq.query_text_id = qst.query_text_id
-        JOIN sys.query_store_plan qp ON qsq.query_id = qp.query_id
-        JOIN sys.query_store_runtime_stats qrs ON qp.plan_id = qrs.plan_id
-        JOIN sys.query_store_runtime_stats_interval qrsi ON qrs.runtime_stats_interval_id = qrsi.runtime_stats_interval_id
-        WHERE qrsi.start_time >= DATEADD(hour, -{int(hours_back)}, GETUTCDATE())
-        ORDER BY {order_by}
-        """)
-        return {'queries': results, 'count': len(results)}
+        eng = engine_of(target)
+        if eng == "mssql":
+            order = {"cpu": "qrs.avg_cpu_time DESC", "duration": "qrs.avg_duration DESC",
+                     "io": "qrs.avg_logical_io_reads DESC"}.get(metric, "qrs.avg_cpu_time DESC")
+            rows = run_query(target, _MSSQL_TOP_STORE.format(n=int(top_n), hours=int(hours_back), order=order))
+            if rows:
+                return {"engine": eng, "source": "query_store", "queries": rows, "count": len(rows)}
+            order2 = {"cpu": "qs.total_worker_time DESC", "duration": "qs.total_elapsed_time DESC",
+                      "io": "qs.total_logical_reads DESC"}.get(metric, "qs.total_worker_time DESC")
+            rows = run_query(target, _MSSQL_TOP_CACHE.format(n=int(top_n), order=order2))
+            return {"engine": eng, "source": "plan_cache(since restart)", "queries": rows, "count": len(rows)}
+        # postgres
+        order = {"cpu": "total_exec_time DESC", "duration": "mean_exec_time DESC",
+                 "io": "(shared_blks_hit + shared_blks_read) DESC"}.get(metric, "total_exec_time DESC")
+        rows = run_query(target, _PG_TOP.format(n=int(top_n), order=order))
+        return {"engine": eng, "source": "pg_stat_statements(cumulative)",
+                "note": "누적 통계 기준 — 시간구간(hours_back) 필터는 PG에서 미지원",
+                "queries": rows, "count": len(rows)}
     except Exception as e:
-        return {'error': str(e)}
+        return {"error": str(e)[:400]}
 
 
 @mcp.tool()
-def get_query_store_regressed_queries(hours_back: int = 24) -> Dict[str, Any]:
-    """Detect queries that regressed in performance (recent CPU > 1.5x historical)."""
+def get_regressed_queries(target: str = "", hours_back: int = 24) -> Dict[str, Any]:
+    """Detect queries that regressed (recent CPU > 1.5x historical).
+    mssql only (needs Query Store time buckets); postgres returns guidance."""
+    target = _t(target)
     try:
-        results = run_query(f"""
-        WITH recent_stats AS (
-            SELECT qp.query_id, AVG(qrs.avg_cpu_time) as recent_cpu, AVG(qrs.avg_duration) as recent_duration
+        eng = engine_of(target)
+        if eng == "postgres":
+            return _unsupported(
+                "regression detection (time-bucketed history)",
+                "pg_stat_statements는 누적 통계만 제공. get_top_queries(metric='duration')로 "
+                "평균 실행시간이 긴 쿼리를 보거나, pg_stat_statements_reset() 후 재수집으로 비교 가능.")
+        rows = run_query(target, f"""
+        WITH recent AS (
+            SELECT qp.query_id, AVG(qrs.avg_cpu_time) cpu
             FROM sys.query_store_runtime_stats qrs
-            JOIN sys.query_store_runtime_stats_interval qrsi ON qrs.runtime_stats_interval_id = qrsi.runtime_stats_interval_id
-            JOIN sys.query_store_plan qp ON qrs.plan_id = qp.plan_id
-            WHERE qrsi.start_time >= DATEADD(hour, -{int(hours_back)}, GETUTCDATE())
-            GROUP BY qp.query_id
-        ),
-        historical_stats AS (
-            SELECT qp.query_id, AVG(qrs.avg_cpu_time) as hist_cpu, AVG(qrs.avg_duration) as hist_duration
+            JOIN sys.query_store_runtime_stats_interval i ON qrs.runtime_stats_interval_id=i.runtime_stats_interval_id
+            JOIN sys.query_store_plan qp ON qrs.plan_id=qp.plan_id
+            WHERE i.start_time >= DATEADD(hour, -{int(hours_back)}, GETUTCDATE()) GROUP BY qp.query_id),
+        hist AS (
+            SELECT qp.query_id, AVG(qrs.avg_cpu_time) cpu
             FROM sys.query_store_runtime_stats qrs
-            JOIN sys.query_store_runtime_stats_interval qrsi ON qrs.runtime_stats_interval_id = qrsi.runtime_stats_interval_id
-            JOIN sys.query_store_plan qp ON qrs.plan_id = qp.plan_id
-            WHERE qrsi.start_time < DATEADD(hour, -{int(hours_back)}, GETUTCDATE())
-            GROUP BY qp.query_id
-        )
-        SELECT TOP 10
-            q.query_id,
-            SUBSTRING(CAST(qt.query_sql_text AS NVARCHAR(MAX)), 1, 500) as query_text,
-            rs.recent_cpu / 1000 as recent_cpu_ms,
-            hs.hist_cpu / 1000 as historical_cpu_ms,
-            CAST((rs.recent_cpu - hs.hist_cpu) / hs.hist_cpu * 100 AS DECIMAL(10,2)) as cpu_regression_pct,
-            rs.recent_duration / 1000 as recent_duration_ms,
-            hs.hist_duration / 1000 as historical_duration_ms
-        FROM recent_stats rs
-        JOIN historical_stats hs ON rs.query_id = hs.query_id
-        JOIN sys.query_store_query q ON rs.query_id = q.query_id
-        JOIN sys.query_store_query_text qt ON q.query_text_id = qt.query_text_id
-        WHERE rs.recent_cpu > hs.hist_cpu * 1.5
-        ORDER BY cpu_regression_pct DESC
-        """)
-        return {'regressed_queries': results, 'count': len(results)}
+            JOIN sys.query_store_runtime_stats_interval i ON qrs.runtime_stats_interval_id=i.runtime_stats_interval_id
+            JOIN sys.query_store_plan qp ON qrs.plan_id=qp.plan_id
+            WHERE i.start_time < DATEADD(hour, -{int(hours_back)}, GETUTCDATE()) GROUP BY qp.query_id)
+        SELECT TOP 10 q.query_id,
+               SUBSTRING(CAST(qt.query_sql_text AS NVARCHAR(MAX)),1,500) query_text,
+               r.cpu/1000 recent_cpu_ms, h.cpu/1000 historical_cpu_ms,
+               CAST((r.cpu-h.cpu)/h.cpu*100 AS DECIMAL(10,2)) regression_pct
+        FROM recent r JOIN hist h ON r.query_id=h.query_id
+        JOIN sys.query_store_query q ON r.query_id=q.query_id
+        JOIN sys.query_store_query_text qt ON q.query_text_id=qt.query_text_id
+        WHERE r.cpu > h.cpu*1.5 ORDER BY regression_pct DESC""")
+        return {"engine": eng, "regressed_queries": rows, "count": len(rows)}
     except Exception as e:
-        return {'error': str(e)}
+        return {"error": str(e)[:400]}
+
+
+# ═══════════════════════ 실시간 ═══════════════════════
+
+@mcp.tool()
+def get_slow_queries(target: str = "", threshold_seconds: int = 5) -> Dict[str, Any]:
+    """Get currently running queries slower than threshold_seconds."""
+    target = _t(target)
+    try:
+        eng = engine_of(target)
+        if eng == "mssql":
+            rows = run_query(target, f"""
+            SELECT TOP 10 r.session_id, r.status, r.command,
+                   r.total_elapsed_time/1000 elapsed_seconds, r.cpu_time, r.logical_reads,
+                   r.blocking_session_id,
+                   SUBSTRING(st.text,(r.statement_start_offset/2)+1,
+                     ((CASE r.statement_end_offset WHEN -1 THEN DATALENGTH(st.text)
+                       ELSE r.statement_end_offset END - r.statement_start_offset)/2)+1) query_text
+            FROM sys.dm_exec_requests r
+            CROSS APPLY sys.dm_exec_sql_text(r.sql_handle) st
+            WHERE r.session_id > 50 AND r.total_elapsed_time/1000 > {int(threshold_seconds)}
+            ORDER BY r.total_elapsed_time DESC""")
+        else:
+            rows = run_query(target, f"""
+            SELECT pid as session_id, state as status,
+                   ROUND(EXTRACT(EPOCH FROM (now() - query_start))::numeric, 1) as elapsed_seconds,
+                   wait_event_type, wait_event, usename, application_name,
+                   LEFT(query, 500) as query_text
+            FROM pg_stat_activity
+            WHERE state <> 'idle' AND pid <> pg_backend_pid()
+              AND query_start < now() - interval '{int(threshold_seconds)} seconds'
+            ORDER BY query_start LIMIT 10""")
+        return {"engine": eng, "slow_queries": rows, "count": len(rows)}
+    except Exception as e:
+        return {"error": str(e)[:400]}
 
 
 @mcp.tool()
-def get_query_store_wait_stats(query_id: int = None, hours_back: int = 24) -> Dict[str, Any]:
-    """Get wait statistics from Query Store, optionally filtered to one query_id."""
+def get_blocking_sessions(target: str = "") -> Dict[str, Any]:
+    """Get blocking chains: who blocks whom, with both queries and wait time."""
+    target = _t(target)
     try:
-        where_clause = f"AND qp.query_id = {int(query_id)}" if query_id else ""
-        results = run_query(f"""
-        SELECT TOP 20
-            qp.query_id,
-            qsws.wait_category_desc,
-            qsws.avg_query_wait_time_ms,
-            qsws.total_query_wait_time_ms,
-            qsws.execution_type_desc
-        FROM sys.query_store_wait_stats qsws
-        JOIN sys.query_store_plan qp ON qsws.plan_id = qp.plan_id
-        JOIN sys.query_store_runtime_stats_interval qrsi ON qsws.runtime_stats_interval_id = qrsi.runtime_stats_interval_id
-        WHERE qrsi.start_time >= DATEADD(hour, -{int(hours_back)}, GETUTCDATE())
-        {where_clause}
-        ORDER BY qsws.avg_query_wait_time_ms DESC
-        """)
-        return {'wait_stats': results, 'count': len(results)}
+        eng = engine_of(target)
+        if eng == "mssql":
+            rows = run_query(target, """
+            SELECT blocking.session_id blocking_session_id, blocked.session_id blocked_session_id,
+                   bt.text blocking_query, kt.text blocked_query,
+                   blocked.wait_time/1000 wait_seconds, blocked.wait_type
+            FROM sys.dm_exec_requests blocked
+            JOIN sys.dm_exec_requests blocking ON blocked.blocking_session_id = blocking.session_id
+            CROSS APPLY sys.dm_exec_sql_text(blocking.sql_handle) bt
+            CROSS APPLY sys.dm_exec_sql_text(blocked.sql_handle) kt
+            WHERE blocked.blocking_session_id > 0""")
+        else:
+            rows = run_query(target, """
+            SELECT blocked.pid as blocked_session_id,
+                   blocker.pid as blocking_session_id,
+                   LEFT(blocker.query, 300) as blocking_query,
+                   LEFT(blocked.query, 300) as blocked_query,
+                   ROUND(EXTRACT(EPOCH FROM (now() - blocked.query_start))::numeric,1) as wait_seconds,
+                   blocked.wait_event_type || ':' || blocked.wait_event as wait_type
+            FROM pg_stat_activity blocked
+            JOIN LATERAL unnest(pg_blocking_pids(blocked.pid)) AS bp(pid) ON true
+            JOIN pg_stat_activity blocker ON blocker.pid = bp.pid
+            WHERE cardinality(pg_blocking_pids(blocked.pid)) > 0""")
+        return {"engine": eng, "blocking_sessions": rows, "count": len(rows)}
     except Exception as e:
-        return {'error': str(e)}
+        return {"error": str(e)[:400]}
 
 
 @mcp.tool()
-def get_query_execution_history(query_id: int, hours_back: int = 168) -> Dict[str, Any]:
-    """Get execution history timeline for a specific query."""
+def get_query_plan(target: str = "", query_fragment: str = "") -> Dict[str, Any]:
+    """Get execution plan for queries matching a text fragment.
+    mssql: plan cache XML. postgres: EXPLAIN of the matching statement text."""
+    target = _t(target)
+    if not query_fragment:
+        return {"error": "query_fragment is required"}
+    safe = query_fragment.replace("'", "''")
     try:
-        results = run_query(f"""
-        SELECT
-            qrsi.start_time,
-            qrsi.end_time,
-            qrs.count_executions,
-            qrs.avg_cpu_time / 1000 as avg_cpu_ms,
-            qrs.avg_duration / 1000 as avg_duration_ms,
-            qrs.avg_logical_io_reads,
-            qrs.avg_query_max_used_memory * 8 / 1024 as avg_memory_mb
-        FROM sys.query_store_runtime_stats qrs
-        JOIN sys.query_store_runtime_stats_interval qrsi ON qrs.runtime_stats_interval_id = qrsi.runtime_stats_interval_id
-        JOIN sys.query_store_plan qp ON qrs.plan_id = qp.plan_id
-        WHERE qp.query_id = {int(query_id)}
-        AND qrsi.start_time >= DATEADD(hour, -{int(hours_back)}, GETUTCDATE())
-        ORDER BY qrsi.start_time
-        """)
-        return {'timeline': results, 'count': len(results)}
+        eng = engine_of(target)
+        if eng == "mssql":
+            rows = run_query(target, f"""
+            SELECT TOP 3 SUBSTRING(st.text,1,300) query_text, qs.execution_count calls,
+                   qs.total_worker_time/1000 total_cpu_ms,
+                   CAST(qp.query_plan AS NVARCHAR(MAX)) plan_xml
+            FROM sys.dm_exec_query_stats qs
+            CROSS APPLY sys.dm_exec_sql_text(qs.sql_handle) st
+            CROSS APPLY sys.dm_exec_query_plan(qs.plan_handle) qp
+            WHERE st.text LIKE '%{safe}%' ORDER BY qs.total_worker_time DESC""")
+            for r in rows:
+                if r.get("plan_xml"):
+                    r["plan_xml"] = r["plan_xml"][:1500] + "...(truncated)"
+            return {"engine": eng, "plans": rows, "count": len(rows)}
+        # postgres: pg_stat_statements에서 문장 찾아 EXPLAIN (파라미터 쿼리는 EXPLAIN 불가할 수 있음)
+        stmts = run_query(target, f"""
+            SELECT query FROM pg_stat_statements
+            WHERE query ILIKE '%{safe}%' AND query NOT ILIKE '%pg_stat_statements%'
+            ORDER BY total_exec_time DESC LIMIT 1""")
+        if not stmts:
+            return {"engine": eng, "plans": [], "count": 0,
+                    "note": f"'{query_fragment}' 매칭 쿼리가 pg_stat_statements에 없음"}
+        q = stmts[0]["query"]
+        if "$1" in q:
+            return {"engine": eng, "matched_query": q[:500], "plans": [],
+                    "note": "파라미터화된 쿼리($1..)는 자동 EXPLAIN 불가 — 쿼리 원문으로 수동 EXPLAIN 권장"}
+        plan = run_query(target, f"EXPLAIN (FORMAT JSON) {q}")
+        key = list(plan[0].keys())[0] if plan else None
+        return {"engine": eng, "matched_query": q[:500],
+                "plan": json.dumps(plan[0][key])[:2000] if plan else None}
     except Exception as e:
-        return {'error': str(e)}
+        return {"error": str(e)[:400]}
+
+
+# ═══════════════════════ 대기 통계 ═══════════════════════
+
+@mcp.tool()
+def get_wait_stats(target: str = "", hours_back: int = 24) -> Dict[str, Any]:
+    """Get wait statistics. mssql: per-query waits from Query Store (windowed).
+    postgres: current wait_event snapshot from pg_stat_activity."""
+    target = _t(target)
+    try:
+        eng = engine_of(target)
+        if eng == "mssql":
+            rows = run_query(target, f"""
+            SELECT TOP 20 qp.query_id, w.wait_category_desc,
+                   w.avg_query_wait_time_ms, w.total_query_wait_time_ms
+            FROM sys.query_store_wait_stats w
+            JOIN sys.query_store_plan qp ON w.plan_id = qp.plan_id
+            JOIN sys.query_store_runtime_stats_interval i ON w.runtime_stats_interval_id=i.runtime_stats_interval_id
+            WHERE i.start_time >= DATEADD(hour, -{int(hours_back)}, GETUTCDATE())
+            ORDER BY w.avg_query_wait_time_ms DESC""")
+            return {"engine": eng, "source": "query_store(windowed)", "wait_stats": rows, "count": len(rows)}
+        rows = run_query(target, """
+            SELECT wait_event_type, wait_event, count(*) as sessions,
+                   array_agg(DISTINCT state) as states
+            FROM pg_stat_activity
+            WHERE wait_event IS NOT NULL AND pid <> pg_backend_pid()
+            GROUP BY 1,2 ORDER BY sessions DESC LIMIT 20""")
+        return {"engine": eng, "source": "pg_stat_activity(snapshot)",
+                "note": "PG는 누적 대기통계가 기본 미제공 — 현재 스냅샷 기준",
+                "wait_stats": rows, "count": len(rows)}
+    except Exception as e:
+        return {"error": str(e)[:400]}
+
+
+# ═══════════════════════ 인덱스 ═══════════════════════
+
+@mcp.tool()
+def suggest_indexes(target: str = "", table_name: str = "") -> Dict[str, Any]:
+    """Index recommendations. mssql: missing-index DMVs with ready CREATE INDEX DDL.
+    postgres: heuristic — tables with heavy sequential scans (index candidates)."""
+    target = _t(target)
+    try:
+        eng = engine_of(target)
+        if eng == "mssql":
+            safe = table_name.replace("'", "''") if table_name else ""
+            where = f"AND OBJECT_NAME(d.object_id, d.database_id) = '{safe}'" if safe else ""
+            rows = run_query(target, f"""
+            SELECT TOP 10 OBJECT_NAME(d.object_id, d.database_id) table_name,
+                   d.equality_columns, d.inequality_columns, d.included_columns,
+                   s.avg_total_user_cost * s.avg_user_impact * (s.user_seeks + s.user_scans) improvement,
+                   'CREATE INDEX IX_' + OBJECT_NAME(d.object_id, d.database_id) + '_auto ON ' + d.statement +
+                   ' (' + ISNULL(d.equality_columns,'') +
+                   CASE WHEN d.equality_columns IS NOT NULL AND d.inequality_columns IS NOT NULL THEN ', ' ELSE '' END +
+                   ISNULL(d.inequality_columns,'') + ')' +
+                   CASE WHEN d.included_columns IS NOT NULL THEN ' INCLUDE (' + d.included_columns + ')' ELSE '' END ddl
+            FROM sys.dm_db_missing_index_details d
+            JOIN sys.dm_db_missing_index_groups g ON d.index_handle = g.index_handle
+            JOIN sys.dm_db_missing_index_group_stats s ON g.index_group_handle = s.group_handle
+            WHERE d.database_id = DB_ID() {where} ORDER BY improvement DESC""")
+            return {"engine": eng, "missing_indexes": rows, "count": len(rows)}
+        safe = table_name.replace("'", "''") if table_name else ""
+        where = f"AND relname = '{safe}'" if safe else ""
+        rows = run_query(target, f"""
+            SELECT relname as table_name, seq_scan, seq_tup_read, idx_scan,
+                   n_live_tup as approx_rows,
+                   CASE WHEN seq_scan > 0 THEN ROUND(seq_tup_read::numeric / seq_scan, 0) ELSE 0 END as avg_rows_per_seqscan
+            FROM pg_stat_user_tables
+            WHERE seq_scan > COALESCE(idx_scan, 0) AND n_live_tup > 1000 {where}
+            ORDER BY seq_tup_read DESC LIMIT 10""")
+        return {"engine": eng, "source": "seq_scan heuristic",
+                "note": "풀스캔이 인덱스스캔보다 많은 테이블 — WHERE 절 컬럼 분석 후 인덱스 후보. "
+                        "정확한 검증은 EXPLAIN + (가능하면 HypoPG)",
+                "index_candidates": rows, "count": len(rows)}
+    except Exception as e:
+        return {"error": str(e)[:400]}
 
 
 @mcp.tool()
-def get_query_store_plan_summary(query_id: int) -> Dict[str, Any]:
-    """Get execution plan summary for a specific query."""
+def get_index_usage(target: str = "") -> Dict[str, Any]:
+    """Find unused or rarely-used indexes (drop candidates) and usage stats."""
+    target = _t(target)
     try:
-        results = run_query(f"""
-        SELECT
-            qp.plan_id,
-            qp.is_forced_plan,
-            qrs.avg_cpu_time / 1000 as avg_cpu_ms,
-            qrs.avg_duration / 1000 as avg_duration_ms,
-            qrs.count_executions,
-            qrs.first_execution_time,
-            qrs.last_execution_time
-        FROM sys.query_store_plan qp
-        JOIN sys.query_store_runtime_stats qrs ON qp.plan_id = qrs.plan_id
-        WHERE qp.query_id = {int(query_id)}
-        ORDER BY qrs.avg_cpu_time DESC
-        """)
-        return {'plans': results, 'count': len(results)}
+        eng = engine_of(target)
+        if eng == "mssql":
+            rows = run_query(target, """
+            SELECT TOP 20 OBJECT_NAME(s.object_id) table_name, i.name index_name,
+                   s.user_seeks, s.user_scans, s.user_lookups, s.user_updates,
+                   CASE WHEN s.user_seeks + s.user_scans + s.user_lookups = 0 THEN 'UNUSED'
+                        WHEN s.user_updates > (s.user_seeks+s.user_scans+s.user_lookups)*10 THEN 'EXPENSIVE'
+                        ELSE 'USED' END usage_status
+            FROM sys.dm_db_index_usage_stats s
+            JOIN sys.indexes i ON s.object_id = i.object_id AND s.index_id = i.index_id
+            WHERE s.database_id = DB_ID() AND OBJECTPROPERTY(s.object_id,'IsUserTable')=1
+            ORDER BY s.user_updates DESC""")
+        else:
+            rows = run_query(target, """
+            SELECT s.relname as table_name, s.indexrelname as index_name,
+                   s.idx_scan as scans,
+                   pg_size_pretty(pg_relation_size(s.indexrelid)) as index_size,
+                   CASE WHEN s.idx_scan = 0 AND NOT i.indisunique AND NOT i.indisprimary THEN 'UNUSED'
+                        WHEN s.idx_scan < 50 THEN 'RARELY_USED' ELSE 'USED' END as usage_status
+            FROM pg_stat_user_indexes s
+            JOIN pg_index i ON s.indexrelid = i.indexrelid
+            ORDER BY s.idx_scan ASC, pg_relation_size(s.indexrelid) DESC LIMIT 20""")
+        return {"engine": eng, "index_usage": rows, "count": len(rows)}
     except Exception as e:
-        return {'error': str(e)}
+        return {"error": str(e)[:400]}
 
 
-# ===== DMV TOOLS =====
+# ═══════════════════════ PG 고유 건강 지표 (mssql은 안내) ═══════════════════════
 
 @mcp.tool()
-def get_slow_queries(threshold_seconds: int = 5) -> Dict[str, Any]:
-    """Get currently running slow queries from sys.dm_exec_requests."""
+def get_table_health(target: str = "") -> Dict[str, Any]:
+    """Table health: postgres — dead tuples/bloat & last (auto)vacuum·analyze.
+    mssql — index fragmentation summary."""
+    target = _t(target)
     try:
-        results = run_query(f"""
-        SELECT TOP 10
-            r.session_id,
-            r.status,
-            r.command,
-            r.cpu_time,
-            r.total_elapsed_time / 1000 as elapsed_seconds,
-            r.logical_reads,
-            r.writes,
-            r.blocking_session_id,
-            SUBSTRING(st.text, (r.statement_start_offset/2)+1,
-                ((CASE r.statement_end_offset
-                    WHEN -1 THEN DATALENGTH(st.text)
-                    ELSE r.statement_end_offset
-                END - r.statement_start_offset)/2) + 1) AS query_text
-        FROM sys.dm_exec_requests r
-        CROSS APPLY sys.dm_exec_sql_text(r.sql_handle) st
-        WHERE r.session_id > 50
-        AND r.total_elapsed_time / 1000 > {int(threshold_seconds)}
-        ORDER BY r.total_elapsed_time DESC
-        """)
-        return {'slow_queries': results, 'count': len(results)}
+        eng = engine_of(target)
+        if eng == "postgres":
+            rows = run_query(target, """
+            SELECT relname as table_name, n_live_tup, n_dead_tup,
+                   CASE WHEN n_live_tup > 0 THEN ROUND(n_dead_tup*100.0/n_live_tup, 1) ELSE 0 END as dead_pct,
+                   last_vacuum, last_autovacuum, last_analyze, last_autoanalyze
+            FROM pg_stat_user_tables
+            WHERE n_live_tup + n_dead_tup > 0
+            ORDER BY n_dead_tup DESC LIMIT 15""")
+            return {"engine": eng, "table_health": rows, "count": len(rows),
+                    "note": "dead_pct 높으면 VACUUM 필요 — autovacuum 동작 여부 확인"}
+        rows = run_query(target, """
+        SELECT TOP 15 OBJECT_NAME(ips.object_id) table_name, i.name index_name,
+               CAST(ips.avg_fragmentation_in_percent AS DECIMAL(5,1)) frag_pct, ips.page_count
+        FROM sys.dm_db_index_physical_stats(DB_ID(), NULL, NULL, NULL, 'LIMITED') ips
+        JOIN sys.indexes i ON ips.object_id = i.object_id AND ips.index_id = i.index_id
+        WHERE ips.page_count > 100 AND ips.avg_fragmentation_in_percent > 10
+        ORDER BY ips.avg_fragmentation_in_percent DESC""")
+        return {"engine": eng, "index_fragmentation": rows, "count": len(rows)}
     except Exception as e:
-        return {'error': str(e)}
-
-
-@mcp.tool()
-def get_blocking_sessions() -> Dict[str, Any]:
-    """Get blocking sessions and what they're blocking."""
-    try:
-        results = run_query("""
-        SELECT
-            blocking.session_id AS blocking_session_id,
-            blocked.session_id AS blocked_session_id,
-            blocking_text.text AS blocking_query,
-            blocked_text.text AS blocked_query,
-            blocked.wait_time / 1000 AS wait_seconds,
-            blocked.wait_type
-        FROM sys.dm_exec_requests blocked
-        INNER JOIN sys.dm_exec_requests blocking
-            ON blocked.blocking_session_id = blocking.session_id
-        CROSS APPLY sys.dm_exec_sql_text(blocking.sql_handle) blocking_text
-        CROSS APPLY sys.dm_exec_sql_text(blocked.sql_handle) blocked_text
-        WHERE blocked.blocking_session_id > 0
-        """)
-        return {'blocking_sessions': results, 'count': len(results)}
-    except Exception as e:
-        return {'error': str(e)}
+        return {"error": str(e)[:400]}
 
 
 @mcp.tool()
-def get_query_plan_from_cache(query_fragment: str) -> Dict[str, Any]:
-    """Get execution plan from plan cache for queries matching a text fragment."""
+def get_connection_stats(target: str = "") -> Dict[str, Any]:
+    """Connection/session breakdown: total, active, idle, idle-in-transaction."""
+    target = _t(target)
     try:
-        safe_fragment = query_fragment.replace("'", "''")
-        conn = get_db_connection()
-        cursor = conn.cursor()
-        cursor.execute(f"""
-        SELECT TOP 5
-            SUBSTRING(st.text, 1, 500) as query_text,
-            qs.execution_count,
-            qs.total_worker_time / 1000 as total_cpu_ms,
-            qs.total_elapsed_time / 1000 as total_duration_ms,
-            qs.total_logical_reads,
-            qs.total_logical_writes,
-            CAST(qp.query_plan AS NVARCHAR(MAX)) as execution_plan_xml
-        FROM sys.dm_exec_query_stats qs
-        CROSS APPLY sys.dm_exec_sql_text(qs.sql_handle) st
-        CROSS APPLY sys.dm_exec_query_plan(qs.plan_handle) qp
-        WHERE st.text LIKE '%{safe_fragment}%'
-        ORDER BY qs.total_worker_time DESC
-        """)
-        columns = [desc[0] for desc in cursor.description]
-        results = []
-        for row in cursor.fetchall():
-            result = dict(zip(columns, row))
-            if result.get('execution_plan_xml'):
-                result['execution_plan_xml'] = result['execution_plan_xml'][:1000] + '...(truncated)'
-            results.append(result)
-        cursor.close()
-        conn.close()
-        return {'plans': results, 'count': len(results)}
+        eng = engine_of(target)
+        if eng == "postgres":
+            rows = run_query(target, """
+            SELECT COALESCE(state,'(none)') as state, count(*) as sessions,
+                   ROUND(EXTRACT(EPOCH FROM max(now()-state_change))::numeric,0) as max_state_seconds
+            FROM pg_stat_activity WHERE pid <> pg_backend_pid()
+            GROUP BY state ORDER BY sessions DESC""")
+            mx = run_query(target, "SHOW max_connections")
+            return {"engine": eng, "by_state": rows,
+                    "max_connections": mx[0].get("max_connections") if mx else None,
+                    "note": "'idle in transaction'이 오래 남으면 락/베큠 지연 원인"}
+        rows = run_query(target, """
+        SELECT s.status, count(*) sessions
+        FROM sys.dm_exec_sessions s WHERE s.is_user_process = 1
+        GROUP BY s.status""")
+        return {"engine": eng, "by_state": rows}
     except Exception as e:
-        return {'error': str(e)}
+        return {"error": str(e)[:400]}
 
 
-@mcp.tool()
-def get_expensive_queries_from_cache(top_n: int = 10, metric: str = "cpu") -> Dict[str, Any]:
-    """Get top expensive queries from plan cache since last restart. Metric: cpu, duration, reads, writes"""
-    try:
-        order_by = {
-            "cpu": "qs.total_worker_time DESC",
-            "duration": "qs.total_elapsed_time DESC",
-            "reads": "qs.total_logical_reads DESC",
-            "writes": "qs.total_logical_writes DESC"
-        }.get(metric, "qs.total_worker_time DESC")
-
-        results = run_query(f"""
-        SELECT TOP {int(top_n)}
-            SUBSTRING(st.text, 1, 500) as query_text,
-            qs.execution_count,
-            qs.total_worker_time / 1000 as total_cpu_ms,
-            qs.total_elapsed_time / 1000 as total_duration_ms,
-            qs.total_logical_reads,
-            qs.total_logical_writes,
-            qs.creation_time,
-            qs.last_execution_time
-        FROM sys.dm_exec_query_stats qs
-        CROSS APPLY sys.dm_exec_sql_text(qs.sql_handle) st
-        ORDER BY {order_by}
-        """)
-        return {'queries': results, 'count': len(results)}
-    except Exception as e:
-        return {'error': str(e)}
-
-
-@mcp.tool()
-def suggest_indexes(table_name: str = None) -> Dict[str, Any]:
-    """Get missing index recommendations from DMVs with CREATE INDEX statements."""
-    try:
-        safe_table = table_name.replace("'", "''") if table_name else None
-        where_clause = f"AND OBJECT_NAME(d.object_id, d.database_id) = '{safe_table}'" if safe_table else ""
-        results = run_query(f"""
-        SELECT TOP 10
-            OBJECT_NAME(d.object_id, d.database_id) AS table_name,
-            d.equality_columns,
-            d.inequality_columns,
-            d.included_columns,
-            s.avg_total_user_cost * s.avg_user_impact * (s.user_seeks + s.user_scans) AS improvement_measure,
-            'CREATE INDEX IX_' + OBJECT_NAME(d.object_id, d.database_id) + '_' +
-                REPLACE(REPLACE(REPLACE(ISNULL(d.equality_columns, ''), ', ', '_'), '[', ''), ']', '') +
-                CASE WHEN d.inequality_columns IS NOT NULL THEN '_' +
-                    REPLACE(REPLACE(REPLACE(d.inequality_columns, ', ', '_'), '[', ''), ']', '')
-                ELSE '' END +
-            ' ON ' + d.statement + ' (' +
-                ISNULL(d.equality_columns, '') +
-                CASE WHEN d.equality_columns IS NOT NULL AND d.inequality_columns IS NOT NULL THEN ', ' ELSE '' END +
-                ISNULL(d.inequality_columns, '') + ')' +
-                CASE WHEN d.included_columns IS NOT NULL THEN ' INCLUDE (' + d.included_columns + ')' ELSE '' END
-            AS create_index_statement,
-            s.user_seeks,
-            s.user_scans,
-            s.last_user_seek,
-            s.last_user_scan
-        FROM sys.dm_db_missing_index_details d
-        INNER JOIN sys.dm_db_missing_index_groups g ON d.index_handle = g.index_handle
-        INNER JOIN sys.dm_db_missing_index_group_stats s ON g.index_group_handle = s.group_handle
-        WHERE d.database_id = DB_ID()
-        {where_clause}
-        ORDER BY improvement_measure DESC
-        """)
-        return {'missing_indexes': results, 'count': len(results)}
-    except Exception as e:
-        return {'error': str(e)}
-
-
-@mcp.tool()
-def get_index_usage() -> Dict[str, Any]:
-    """Get index usage statistics to identify unused or expensive indexes."""
-    try:
-        results = run_query("""
-        SELECT TOP 20
-            OBJECT_NAME(s.object_id) AS table_name,
-            i.name AS index_name,
-            s.user_seeks,
-            s.user_scans,
-            s.user_lookups,
-            s.user_updates,
-            CASE
-                WHEN s.user_seeks + s.user_scans + s.user_lookups = 0 THEN 'UNUSED'
-                WHEN s.user_updates > (s.user_seeks + s.user_scans + s.user_lookups) * 10 THEN 'EXPENSIVE'
-                ELSE 'USED'
-            END AS usage_status
-        FROM sys.dm_db_index_usage_stats s
-        INNER JOIN sys.indexes i ON s.object_id = i.object_id AND s.index_id = i.index_id
-        WHERE s.database_id = DB_ID()
-        AND OBJECTPROPERTY(s.object_id, 'IsUserTable') = 1
-        ORDER BY s.user_updates DESC
-        """)
-        return {'index_usage': results, 'count': len(results)}
-    except Exception as e:
-        return {'error': str(e)}
-
-
-# ===== NOTIFICATION TOOL =====
+# ═══════════════════════ 알림 ═══════════════════════
 
 @mcp.tool()
 def send_slack_notification(message: str, severity: str = "INFO", channel: str = "") -> Dict[str, Any]:
@@ -439,7 +478,7 @@ def send_slack_notification(message: str, severity: str = "INFO", channel: str =
         from connections import send_slack
         return send_slack(message, severity, channel=channel)
     except Exception as e:
-        return {'status': 'error', 'error': str(e)}
+        return {"status": "error", "error": str(e)[:300]}
 
 
 if __name__ == "__main__":

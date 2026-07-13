@@ -6,6 +6,7 @@ a2a-sdk
 uvicorn
 mcp
 pymssql
+psycopg2-binary
 boto3
 streamlit
 httpx
