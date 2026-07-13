@@ -48,10 +48,11 @@ bash deploy/install.sh          # OS 패키지 + venv + systemd 유닛(dbaops 4 
 2. perf-agent 의존성 + a2a-sdk 설치, dbaops-a2a·dbperf-a2a·dbperf-streamlit 유닛 등록·기동
 3. `/etc/dbaops/dbaops.env`에 perf 기본값 추가 (공유 env)
 
-접속:
-- DBAOps UI → http://\<EC2-IP\>:8501
-- **Perf UI → http://\<EC2-IP\>:8502** (perf 채팅 / ops 채팅 / 연동 관리)
+접속 (데모 배포 기준 — CloudFront):
+- **DBAOps UI** → https://dpgp5ivsrtdp4.cloudfront.net (도메인 파이프라인 탭 + MCP 연결설정)
+- **Perf UI** → https://dcc3of9o678kv.cloudfront.net (perf 채팅 / ops 채팅 / 연동 관리)
 - Slack → 채널에서 `@DBAOps 질문` (Socket Mode)
+- (직접 배포 시: http://<EC2-IP>:8501 / :8502, SG 인바운드 필요)
 
 상세: [perf-agent/MANUAL.md](perf-agent/MANUAL.md) · [perf-agent/AGENT_GUIDE.md](perf-agent/AGENT_GUIDE.md) ·
 [dbaops/deploy/ec2-vanilla/README.md](dbaops/deploy/ec2-vanilla/README.md) ·
