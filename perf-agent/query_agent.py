@@ -72,6 +72,10 @@ SYSTEM_PROMPT = """You are an RDS SQL Server query performance optimization spec
   ops agent, send it a clear question in Korean via a2a_send_message and integrate
   the answer into your report (cite it as coming from the DBAOps agent).
 - Never forward SQL Server questions to it — that is your own job.
+- IMPORTANT — reading a2a_send_message results: the DBAOps answer text is inside
+  response.task.artifacts[].parts[].text (a nested JSON structure). Always dig into
+  that path and quote the actual answer text verbatim. Never reply with an empty
+  "here is what DBAOps said:" — extract and include the real text from the artifacts.
 
 **Response format:**
 
