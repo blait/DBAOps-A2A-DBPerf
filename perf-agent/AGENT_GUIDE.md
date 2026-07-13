@@ -1,221 +1,148 @@
-# Query Performance Agent — 기능 및 사용 가이드
+# Perf Agent — 기능 및 사용 가이드
 
-DBAOps-A2A-DBPerf 스택의 SQL Server 쿼리 성능 분석 에이전트.
-Bedrock Claude(Sonnet 4.5)가 stdio MCP로 연결된 13개 진단 도구를 스스로 골라 호출하고,
-결과를 해석해서 한국어/영어로 분석 리포트를 만들어 준다.
+DBAOps-A2A-DBPerf 스택의 **쿼리 성능 전문 에이전트** (LangGraph 기반).
+**SQL Server / PostgreSQL / MySQL** 세 엔진을 하나의 도구 세트로 진단한다 —
+도구는 논리적으로 하나, 내부 SQL만 엔진별로 자동 분기(dialect).
 
-대상 DB: RDS SQL Server `sql-server-instance` (기본 분석 DB: `master`, `DB_NAME` 환경 변수로 변경)
+워크플로: `analyze(ReAct) → validate(검증) → revise(조건부 1회) → report`
+— 분석 결과를 별도 LLM이 검증해 날조/누락을 거른 뒤 리포트로 정리한다.
 
 ---
 
-## 이 에이전트가 할 수 있는 것
+## 대상 DB (target)
 
-### 1. 쿼리 성능 진단 (Query Store 기반 — 과거 이력 분석)
+모든 진단 도구는 `target` 파라미터로 대상을 고른다. 등록된 타깃은 대화에서
+"pg-test 봐줘", "mysql 쪽은?" 처럼 자연어로 지정하면 에이전트가 알아서 매핑한다.
 
-Query Store가 켜져 있으면 시간 범위를 지정한 **과거 이력 분석**이 가능하다.
-
-| 능력 | 사용하는 도구 | 설명 |
+| target | engine | 설명 |
 |---|---|---|
-| Query Store 상태 확인 | `check_query_store_enabled` | 활성화 여부, 저장 용량, 캡처 모드. 에이전트가 항상 제일 먼저 호출 |
-| 리소스 상위 쿼리 조회 | `get_query_store_top_queries` | CPU/실행시간/IO/메모리 기준 Top-N (기간 지정 가능) |
-| 성능 회귀 감지 | `get_query_store_regressed_queries` | 최근 CPU가 과거 평균의 1.5배를 넘은 쿼리를 자동 탐지 |
-| 쿼리별 대기 통계 | `get_query_store_wait_stats` | 어떤 쿼리가 어떤 대기(락, IO, CPU 등)로 느린지 분해 |
-| 실행 이력 타임라인 | `get_query_execution_history` | 특정 query_id의 성능 추이 (기본 7일) — "언제부터 느려졌나" 답변용 |
-| 실행 계획 요약 | `get_query_store_plan_summary` | 쿼리의 플랜 목록, 강제 플랜 여부, 플랜별 성능 비교 |
+| `mssql-main` | SQL Server | RDS sql-server-instance (기본) |
+| `pg-test` | PostgreSQL | dbaops-seoul-test-pg (appdb) |
+| `mysql-poc` | MySQL 8.0 | dbaops-poc-mysql (dbaops, 3,400만건 테이블) |
 
-### 2. 실시간 진단 (DMV 기반 — Query Store 꺼져 있어도 동작)
+타깃 추가/변경: `/etc/dbaops/dbaops.env`의 `DB_TARGETS`(JSON) 수정 후 `sudo systemctl restart dbperf-a2a`.
 
-| 능력 | 사용하는 도구 | 설명 |
+## 이 에이전트가 할 수 있는 것 (도구 13개)
+
+### 📋 타깃 조회 (1)
+| 도구 | 쉽게 말하면 |
+|---|---|
+| `list_db_targets` | "분석 가능한 DB 목록 보여줘" |
+
+### 📜 이력/저장소 (3)
+| 도구 | 쉽게 말하면 | 엔진별 소스 |
 |---|---|---|
-| 지금 느린 쿼리 | `get_slow_queries` | 현재 실행 중이며 임계값(기본 5초) 이상 걸린 쿼리 |
-| 블로킹 체인 | `get_blocking_sessions` | 누가 누구를 막고 있는지, 블로커/블록드 쿼리 텍스트와 대기 시간 |
-| 플랜 캐시 검색 | `get_query_plan_from_cache` | 쿼리 텍스트 조각으로 실행 계획(XML) 검색 |
-| 재시작 이후 비싼 쿼리 | `get_expensive_queries_from_cache` | 플랜 캐시 누적 통계 기준 Top-N (CPU/시간/읽기/쓰기) |
+| `check_query_store_enabled` | "쿼리 이력 녹화장치 켜져 있어?" | Query Store / pg_stat_statements / performance_schema |
+| `get_top_queries` | "리소스(CPU/시간/IO) 제일 많이 먹은 쿼리 톱N" | mssql은 시간창 지원, pg/mysql은 누적 |
+| `get_regressed_queries` | "예전보다 느려진 쿼리 찾아줘" | **mssql 전용** — 타 엔진은 대안 안내 반환 |
 
-### 3. 최적화 권고
+### 🔴 실시간 (4)
+| 도구 | 쉽게 말하면 |
+|---|---|
+| `get_slow_queries` | "지금 이 순간 N초 넘게 돌고 있는 쿼리" |
+| `get_blocking_sessions` | "누가 누구를 막고 있어?" (락 체인 — 가해자/피해자 쿼리) |
+| `get_query_plan` | "이 쿼리 실행계획 보여줘" (플랜캐시 XML / EXPLAIN JSON) |
+| `get_wait_stats` | "뭘 기다리느라 느린 거야?" (mssql: 쿼리별, pg: 스냅샷, mysql: 누적) |
 
-| 능력 | 사용하는 도구 | 설명 |
-|---|---|---|
-| 누락 인덱스 추천 | `suggest_indexes` | DMV 기반 누락 인덱스 + **바로 실행 가능한 CREATE INDEX 문 생성** (테이블 필터 가능) |
-| 인덱스 사용 현황 | `get_index_usage` | UNUSED(안 쓰임) / EXPENSIVE(유지비용 과다) / USED 분류 |
+### 🔧 인덱스/건강 (4)
+| 도구 | 쉽게 말하면 |
+|---|---|
+| `suggest_indexes` | "인덱스 만들면 빨라질 곳" — mssql은 CREATE INDEX DDL까지, pg/mysql은 풀스캔 테이블 후보 |
+| `get_index_usage` | "안 쓰는 인덱스 뭐야?" (삭제 후보) |
+| `get_table_health` | pg: dead tuple/VACUUM, mysql: 단편화/OPTIMIZE 후보, mssql: 인덱스 단편화 |
+| `get_connection_stats` | 세션 상태 분포 (idle in transaction 등) + max_connections |
 
-### 4. 알림
+### 📢 알림 (1)
+`send_slack_notification` — 분석 결과를 Slack 채널로 발송 (명시적 요청 시에만)
 
-| 능력 | 사용하는 도구 | 설명 |
-|---|---|---|
-| Slack 알림 발송 | `send_slack_notification` | Bot Token(chat.postMessage)으로 발송. 심각도 INFO/WARNING/CRITICAL. **사용자가 명시적으로 요청할 때만** 보내도록 프롬프트에 제한됨 |
+### 🤝 A2A 협업 (내장 도구)
+`ask_dbaops_agent` — OS/인프라 메트릭·Kafka·로그 등 쿼리 튜닝 밖 질문을
+DBAOps 에이전트에 A2A로 위임하고 답을 인용. (반대로 DBAOps도 `ask_perf_agent`로 위임해옴)
 
-### 에이전트의 동작 방식
-
-1. 질문을 받으면 **Query Store 활성화 여부를 먼저 확인**
-2. 켜져 있으면 이력 기반 도구, 꺼져 있으면 DMV 실시간 도구로 자동 전환 (제약도 함께 안내)
-3. 필요한 도구를 조합 호출 → 결과를 해석 → 구조화된 리포트로 응답
-   (Query Store 상태 / 분석 기간 / 상위 쿼리 / 발견된 문제 / 최적화 권고 / 액션 아이템)
-
-### 할 수 없는 것 (범위 밖)
-
-- DB 변경 작업 — 인덱스를 직접 생성하거나 쿼리를 죽이지 않음 (권고문만 생성, 실행은 사람 몫)
-- CPU/메모리/스토리지 등 인스턴스 레벨 메트릭 — CloudWatch/Performance Insights 도구는 이 번들에 없음 (health-tools는 별도)
-- 보안 감사, 백업/스토리지 수명주기 — 다른 에이전트 영역
-- Performance Insights — 대상 인스턴스에 PI가 비활성화되어 있기도 함
+### 할 수 없는 것
+- DB 변경 실행 (인덱스 생성/쿼리 킬 — 권고문만 제시)
+- OS/인프라 메트릭·로그 RCA (DBAOps 담당 — A2A로 자동 위임)
+- pg/mysql의 시간구간별 성능 이력 (누적 통계만 — 도구가 제약을 정직하게 안내)
 
 ---
 
 ## 사용법
 
-```bash
-# Streamlit UI
-open http://<host>:8502
+### Streamlit UI — https://dcc3of9o678kv.cloudfront.net (또는 :8502)
+⚡ Query Performance 탭에서 질문. 🧭 탭은 DBAOps, 🔌 탭은 연동 상태.
 
-# CLI (venv)
+### Slack — `@perfagent 질문` (토큰 설정 시)
+스레드에서 멘션 없이 후속 질문 가능. 설정: [MANUAL.md](MANUAL.md) §4-1.
+
+### CLI
+```bash
 VENV=/opt/dbaops/venv
-$VENV/bin/python query_agent.py            # 대화형
-$VENV/bin/python query_agent.py "지난 24시간 CPU 상위 쿼리 5개 보여줘"
+$VENV/bin/python query_agent.py "mysql-poc 풀스캔 많은 테이블"   # 원샷
+$VENV/bin/python query_agent.py                                  # 대화형
+$VENV/bin/python connections.py status                           # 연동 상태
 ```
 
-분석 대상 DB를 바꾸려면 `/etc/dbaops/dbaops.env`의 `DB_NAME` 수정 후 `sudo systemctl restart dbperf-a2a`.
+### A2A (다른 에이전트/스크립트에서)
+Agent card: `http://127.0.0.1:9100/.well-known/agent-card.json`
 
 ---
 
 ## 사용례
 
-### 사용례 1: 일상 성능 점검
-
+### 1. 멀티엔진 한눈에
 ```
-You> 지난 24시간 동안 CPU를 가장 많이 쓴 쿼리 5개를 보여주고, 문제가 있으면 알려줘
+You> 등록된 DB 다 보여주고, 각각 상태 요약해줘
 ```
+→ list_db_targets → 엔진별 check/connection_stats 순회 → 3개 DB 요약 리포트
 
-에이전트 동작: `check_query_store_enabled` → `get_query_store_top_queries(hours_back=24, top_n=5, metric="cpu")`
-→ CPU ms, 실행 횟수, 쿼리 텍스트를 표로 정리하고 비정상 패턴(예: 평균 CPU가 수 초인 쿼리)을 짚어줌.
-
-### 사용례 2: "갑자기 느려졌어요" 회귀 조사
-
+### 2. MySQL 풀스캔 잡기 (실제 데모 검증됨)
 ```
-You> 어제부터 애플리케이션이 느려졌다는 신고가 있어. 성능이 나빠진 쿼리가 있는지 찾아줘
+You> mysql-poc 풀스캔 많은 테이블이랑 미사용 인덱스 봐줘
 ```
+→ suggest_indexes + get_index_usage → "dbaops_orders 누적 1.3조 행 풀스캔, 지연 5.62일" 식의
+실데이터 리포트 + 인덱스 후보 제시
 
-에이전트 동작: `get_query_store_regressed_queries(hours_back=24)` → 회귀율(%) 상위 쿼리 목록
-→ 특정 쿼리가 나오면 `get_query_execution_history(query_id=...)`로 언제부터 나빠졌는지 타임라인 확인
-→ `get_query_store_plan_summary(query_id=...)`로 플랜이 바뀌었는지(플랜 회귀) 진단.
-
-### 사용례 3: 지금 발생 중인 장애 대응 (블로킹/느린 쿼리)
-
+### 3. PG 건강 점검
 ```
-You> 지금 DB가 멈춘 것 같아. 블로킹이나 오래 걸리는 쿼리가 있는지 당장 확인해줘
+You> pg-test 상위 쿼리랑 vacuum 상태 분석해줘
 ```
+→ get_top_queries + get_table_health → dead tuple %, autovacuum 이력 포함 리포트
 
-에이전트 동작: `get_blocking_sessions` + `get_slow_queries(threshold_seconds=5)` 동시 확인
-→ 블로킹 체인(세션 A가 B를 몇 초째 막는 중, 각 쿼리 텍스트)과 장기 실행 쿼리를 보고
-→ KILL할 세션 후보를 제안 (실행은 하지 않음).
-
-### 사용례 4: 인덱스 최적화 작업
-
+### 4. SQL Server 회귀 조사
 ```
-You> Orders 테이블에 필요한 인덱스 추천해주고, 반대로 안 쓰는 인덱스도 알려줘
+You> mssql 쪽에 어제부터 느려진 쿼리 있어?
 ```
+→ get_regressed_queries (Query Store 시간창 비교) → 회귀율 상위 목록
+(Query Store 꺼져 있으면 그 사실과 켜는 법 안내)
 
-에이전트 동작: `suggest_indexes(table_name="Orders")` + `get_index_usage`
-→ 개선 효과 점수 순으로 CREATE INDEX 문을 그대로 복사해 쓸 수 있게 제시하고,
-UNUSED/EXPENSIVE 인덱스는 DROP 검토 대상으로 분리해서 보고.
-
-### 사용례 5: 특정 쿼리 심층 분석
-
+### 5. 장애 대응 (블로킹)
 ```
-You> sp_CustomerOrderSummary 관련 쿼리의 실행 계획을 찾아서 왜 느린지 분석해줘
+You> pg-test 지금 락 걸린 거 있는지 당장 확인해줘
 ```
+→ get_blocking_sessions + get_slow_queries → 블로킹 체인(가해자/피해자 쿼리, 대기시간) 보고
 
-에이전트 동작: `get_query_plan_from_cache(query_fragment="sp_CustomerOrderSummary")`
-→ 플랜 XML에서 테이블 스캔, 암시적 변환, 스칼라 UDF 같은 안티패턴을 찾아 원인을 설명하고 재작성 방향 제안.
-
-### 사용례 6: Query Store가 꺼진 DB 점검
-
+### 6. 인프라와 교차 분석 (A2A)
 ```
-You> 이 DB 성능 분석 좀 해줘
+You> mssql 쿼리는 네가 보고, 같은 시간대 호스트/인프라 상황은 DBAOps한테 물어서 종합해줘
 ```
+→ 자기 도구로 쿼리 분석 + ask_dbaops_agent로 DBAOps 답변 인용 → 통합 리포트
 
-에이전트 동작: `check_query_store_enabled` → 꺼져 있음을 확인하고 안내
-→ 자동으로 DMV 모드로 전환: `get_expensive_queries_from_cache` + `get_slow_queries`
-→ "재시작 이후 누적 데이터 기준" 이라는 제약을 명시하고, Query Store 활성화를 권고
-(`ALTER DATABASE ... SET QUERY_STORE = ON` 문 포함).
-
-### 사용례 7: 점검 결과 Slack 발송
-
+### 7. 결과 Slack 공유
 ```
-You> 오늘 성능 점검 결과를 요약해서 WARNING 등급으로 Slack에 보내줘
+You> 방금 분석 WARNING으로 Slack에 보내줘
 ```
-
-에이전트 동작: 위 분석 도구들 실행 후 `send_slack_notification(message=..., severity="WARNING")`
-→ Slack 채널로 발송. (사전 설정: `.env`의 `SLACK_BOT_TOKEN`/`SLACK_CHANNEL` + 채널에 `/invite @DBAOps`)
-
-### 사용례 8: 에이전트 없이 도구만 직접 사용 (MCP 클라이언트)
-
-Claude Code 등 MCP 클라이언트를 EC2에서 쓸 때 `.mcp.json`:
-
-```json
-{
-  "mcpServers": {
-    "dbops-query-tools": {
-      "command": "python3",
-      "args": ["/path/to/perf-agent/mcp_query_tools.py"],
-      "env": {
-        "AWS_REGION": "ap-northeast-2",
-        "DB_SECRET_ID": "dbops-sqlserver-secret",
-        "DB_NAME": "DBOpsLab"
-      }
-    }
-  }
-}
-```
-
-스크립트에서 프로그래밍 방식으로 도구 호출:
-
-```python
-import asyncio
-from mcp import ClientSession, StdioServerParameters, stdio_client
-
-async def main():
-    params = StdioServerParameters(
-        command="python3",
-        args=["/path/to/perf-agent/mcp_query_tools.py"],
-        env={"AWS_REGION": "ap-northeast-2", "DB_SECRET_ID": "dbops-sqlserver-secret", "DB_NAME": "DBOpsLab"},
-    )
-    async with stdio_client(params) as (r, w):
-        async with ClientSession(r, w) as s:
-            await s.initialize()
-            result = await s.call_tool("get_query_store_top_queries",
-                                       {"hours_back": 24, "top_n": 5, "metric": "cpu"})
-            print(result.content[0].text)
-
-asyncio.run(main())
-```
-
-### 사용례 9: 부하 실습 시나리오와 결합 (이 저장소의 load_generator 활용)
-
-```bash
-# 1. 부하 생성 (별도 터미널) — DBOpsLab에 고CPU 프로시저 워크로드 시작
-./start_benchmark.sh 60
-
-# 2. 에이전트로 진단
-DB_NAME=DBOpsLab /opt/dbaops/venv/bin/python query_agent.py "CPU가 높은 원인 쿼리를 찾고 인덱스 개선안을 만들어줘"
-
-# 3. 에이전트가 추천한 CREATE INDEX 적용 (또는 04_create_indexes_fix.sql 실행)
-
-# 4. 개선 확인
-DB_NAME=DBOpsLab /opt/dbaops/venv/bin/python query_agent.py "인덱스 적용 후 성능이 개선됐는지 회귀 쿼리 기준으로 비교해줘"
-```
+→ send_slack_notification (사전에 SLACK_BOT_TOKEN/SLACK_CHANNEL 설정 필요)
 
 ---
 
-## 자주 쓰는 프롬프트 모음
+## 자주 쓰는 프롬프트
 
-| 목적 | 프롬프트 예시 |
+| 목적 | 예시 |
 |---|---|
-| 전체 점검 | "지난 24시간 쿼리 성능 전반적으로 점검해줘" |
-| CPU 원인 | "CPU 사용량 기준 상위 쿼리 10개와 각각의 개선 방법 알려줘" |
-| IO 원인 | "논리 읽기가 많은 쿼리를 찾아서 인덱스로 해결 가능한지 봐줘" |
-| 회귀 | "최근 48시간 내 성능이 나빠진 쿼리 있어?" |
-| 블로킹 | "블로킹 세션 확인해줘" |
-| 대기 분석 | "query_id 42가 뭘 기다리느라 느린지 대기 통계 봐줘" |
-| 인덱스 | "누락 인덱스 추천 전부 보여줘. CREATE 문 포함해서" |
-| 정리 | "안 쓰는 인덱스 찾아줘. 삭제해도 되는지 판단 근거도" |
-| 알림 | "방금 분석 결과를 CRITICAL로 Slack에 보내줘" |
+| 타깃 확인 | "분석 가능한 DB 뭐 있어?" |
+| 상위 쿼리 | "pg-test에서 제일 비싼 쿼리 5개" |
+| 실시간 | "mysql-poc 지금 느린 쿼리/블로킹 확인" |
+| 플랜 | "orders 들어간 쿼리 실행계획 봐줘 (pg-test)" |
+| 인덱스 | "mssql 누락 인덱스 추천, CREATE 문 포함" |
+| 건강 | "pg-test 테이블 bloat 상태" / "mysql-poc 단편화" |
+| 교차 | "쿼리는 네가, 인프라는 DBAOps한테 — 종합 리포트" |

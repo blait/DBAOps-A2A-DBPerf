@@ -162,14 +162,19 @@ aws secretsmanager put-secret-value --secret-id dbops-sqlserver-secret --region 
 > perf는 `PERF_BEDROCK_MODEL_ID`를 코드 기본값으로 쓴다. 유닛이 넘기지 않으면 코드 기본값
 > (sonnet-4-5) 사용 — DBAOps의 `BEDROCK_MODEL_ID`(opus)와 독립.
 
-## 6. 도구 목록 (13개)
+## 6. 도구 목록 (멀티엔진 — mssql / postgres / mysql 자동 분기)
 
-Query Store (6): check_query_store_enabled, get_query_store_top_queries,
-get_query_store_regressed_queries, get_query_store_wait_stats,
-get_query_execution_history, get_query_store_plan_summary
+모든 진단 도구는 `target` 파라미터로 대상 DB를 고른다 (미지정 시 첫 타깃).
+타깃은 `/etc/dbaops/dbaops.env`의 `DB_TARGETS`(JSON)로 등록 — `list_db_targets`로 조회.
 
-DMV (6): get_slow_queries, get_blocking_sessions, get_query_plan_from_cache,
-get_expensive_queries_from_cache, suggest_indexes, get_index_usage
+조회 (1): list_db_targets
+
+이력/저장소 (3): check_query_store_enabled (QS/pg_stat_statements/performance_schema),
+get_top_queries, get_regressed_queries (mssql만 — 타 엔진은 안내 반환)
+
+실시간 (4): get_slow_queries, get_blocking_sessions, get_query_plan, get_wait_stats
+
+인덱스/건강 (4): suggest_indexes, get_index_usage, get_table_health, get_connection_stats
 
 알림 (1): send_slack_notification (bot token)
 

@@ -13,15 +13,12 @@ mcp_query_tools.py - stdio MCP 서버: 쿼리 성능 진단 도구 (멀티엔진
 {"unsupported": ..., "hint": ...}로 안내를 반환한다 — LLM이 사용자에게 설명 가능.
 """
 import json
-import os
 from typing import Any, Dict
 
 from mcp.server.fastmcp import FastMCP
 
 import db_targets
 from db_targets import engine_of, run_query
-
-AWS_REGION = os.environ.get('AWS_REGION', 'ap-northeast-2')
 
 mcp = FastMCP("dbperf-query-tools")
 
