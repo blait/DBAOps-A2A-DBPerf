@@ -96,29 +96,32 @@ def build_agent_card() -> AgentCard:
     )
 
 
-async def _startup() -> None:
-    """MCP stdio 세션을 열고 그래프를 빌드 — 프로세스 수명 동안 유지."""
+async def _mcp_session_keeper() -> None:
+    """MCP stdio 세션을 한 태스크 안에서 열고 유지 — anyio cancel scope는
+    같은 태스크에서 enter/exit 해야 하므로, 이 keeper 태스크가 수명을 관리한다."""
     global _GRAPH
     params = StdioServerParameters(command=sys.executable,
                                    args=[perf_graph.SERVER_SCRIPT],
                                    env={**os.environ})
-    stack = contextlib.AsyncExitStack()
-    read, write = await stack.enter_async_context(stdio_client(params))
-    session = await stack.enter_async_context(ClientSession(read, write))
-    await session.initialize()
-    tools = await perf_graph.load_perf_tools(session)
-    _GRAPH = perf_graph.build_graph(tools)
-    _READY.set()
-    logger.info("perf graph ready — %d tools (validation=%s)",
-                len(tools), perf_graph.ENABLE_VALIDATION)
-    # stack은 close하지 않음 — 세션이 서버 수명 동안 상주 (프로세스 종료 시 정리)
+    async with stdio_client(params) as (read, write):
+        async with ClientSession(read, write) as session:
+            await session.initialize()
+            tools = await perf_graph.load_perf_tools(session)
+            _GRAPH = perf_graph.build_graph(tools)
+            _READY.set()
+            logger.info("perf graph ready — %d tools (validation=%s)",
+                        len(tools), perf_graph.ENABLE_VALIDATION)
+            # 서버 수명 동안 세션 유지
+            await asyncio.Event().wait()
 
 
 @contextlib.asynccontextmanager
 async def _lifespan(app):  # noqa: ANN001
-    task = asyncio.get_running_loop().create_task(_startup())
+    keeper = asyncio.get_running_loop().create_task(_mcp_session_keeper())
     yield
-    task.cancel()
+    keeper.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await keeper
 
 
 def main():
