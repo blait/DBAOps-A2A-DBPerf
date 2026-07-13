@@ -4,6 +4,7 @@ mcp_query_tools.py - stdio MCP 서버: 쿼리 성능 진단 도구 (멀티엔진
 논리 도구는 하나의 세트, 내부 구현만 DB 엔진별(dialect)로 분기한다:
   - mssql    : Query Store + DMV (sys.query_store_*, sys.dm_exec_*)
   - postgres : pg_stat_statements + pg_stat_activity/pg_locks/EXPLAIN
+  - mysql    : performance_schema (events_statements_summary, sys 스키마)
 
 모든 진단 도구는 target 파라미터(기본: 첫 번째 타깃)로 대상 DB를 고른다.
 타깃 정의는 db_targets.py(DB_TARGETS env) 참고. list_db_targets로 조회.
@@ -64,6 +65,12 @@ def check_query_store_enabled(target: str = "") -> Dict[str, Any]:
                         "storage_used_mb": r["current_storage_size_mb"],
                         "storage_max_mb": r["max_storage_size_mb"]}
             return {"engine": eng, "enabled": False, "error": "Query Store not configured"}
+        if eng == "mysql":
+            rows = run_query(target, "SHOW GLOBAL VARIABLES LIKE 'performance_schema'")
+            on = rows and rows[0].get("Value") == "ON"
+            digest = run_query(target, "SELECT count(*) c FROM performance_schema.events_statements_summary_by_digest") if on else []
+            return {"engine": eng, "enabled": bool(on), "source": "performance_schema",
+                    "digest_rows": digest[0]["c"] if digest else 0}
         # postgres
         rows = run_query(target, "SELECT extname, extversion FROM pg_extension WHERE extname='pg_stat_statements'")
         if rows:
@@ -145,6 +152,22 @@ def get_top_queries(target: str = "", hours_back: int = 24, top_n: int = 10,
                       "io": "qs.total_logical_reads DESC"}.get(metric, "qs.total_worker_time DESC")
             rows = run_query(target, _MSSQL_TOP_CACHE.format(n=int(top_n), order=order2))
             return {"engine": eng, "source": "plan_cache(since restart)", "queries": rows, "count": len(rows)}
+        if eng == "mysql":
+            order_my = {"cpu": "SUM_TIMER_WAIT DESC", "duration": "AVG_TIMER_WAIT DESC",
+                        "io": "SUM_ROWS_EXAMINED DESC"}.get(metric, "SUM_TIMER_WAIT DESC")
+            rows = run_query(target, f"""
+                SELECT LEFT(DIGEST_TEXT, 500) AS query_text,
+                       COUNT_STAR AS calls,
+                       ROUND(SUM_TIMER_WAIT/1e9, 1) AS total_duration_ms,
+                       ROUND(AVG_TIMER_WAIT/1e9, 2) AS avg_duration_ms,
+                       ROUND(SUM_ROWS_EXAMINED/NULLIF(COUNT_STAR,0), 1) AS avg_rows_examined,
+                       LAST_SEEN AS last_execution_time
+                FROM performance_schema.events_statements_summary_by_digest
+                WHERE SCHEMA_NAME IS NOT NULL AND SCHEMA_NAME NOT IN ('performance_schema','mysql','sys')
+                ORDER BY {order_my} LIMIT {int(top_n)}""")
+            return {"engine": eng, "source": "performance_schema(cumulative)",
+                    "note": "누적 통계 기준 — 시간구간(hours_back) 필터는 MySQL에서 미지원",
+                    "queries": rows, "count": len(rows)}
         # postgres
         order = {"cpu": "total_exec_time DESC", "duration": "mean_exec_time DESC",
                  "io": "(shared_blks_hit + shared_blks_read) DESC"}.get(metric, "total_exec_time DESC")
@@ -168,6 +191,11 @@ def get_regressed_queries(target: str = "", hours_back: int = 24) -> Dict[str, A
                 "regression detection (time-bucketed history)",
                 "pg_stat_statements는 누적 통계만 제공. get_top_queries(metric='duration')로 "
                 "평균 실행시간이 긴 쿼리를 보거나, pg_stat_statements_reset() 후 재수집으로 비교 가능.")
+        if eng == "mysql":
+            return _unsupported(
+                "regression detection (time-bucketed history)",
+                "performance_schema는 누적 통계만 제공. get_top_queries(metric='duration')로 "
+                "평균 실행시간 상위를 보거나, TRUNCATE events_statements_summary_by_digest 후 재수집으로 비교 가능.")
         rows = run_query(target, f"""
         WITH recent AS (
             SELECT qp.query_id, AVG(qrs.avg_cpu_time) cpu
@@ -214,6 +242,14 @@ def get_slow_queries(target: str = "", threshold_seconds: int = 5) -> Dict[str, 
             CROSS APPLY sys.dm_exec_sql_text(r.sql_handle) st
             WHERE r.session_id > 50 AND r.total_elapsed_time/1000 > {int(threshold_seconds)}
             ORDER BY r.total_elapsed_time DESC""")
+        elif eng == "mysql":
+            rows = run_query(target, f"""
+            SELECT ID AS session_id, STATE AS status, TIME AS elapsed_seconds,
+                   USER AS usename, DB AS dbname, LEFT(INFO, 500) AS query_text
+            FROM information_schema.PROCESSLIST
+            WHERE COMMAND NOT IN ('Sleep','Daemon','Binlog Dump') AND INFO IS NOT NULL
+              AND TIME > {int(threshold_seconds)} AND ID <> CONNECTION_ID()
+            ORDER BY TIME DESC LIMIT 10""")
         else:
             rows = run_query(target, f"""
             SELECT pid as session_id, state as status,
@@ -245,6 +281,17 @@ def get_blocking_sessions(target: str = "") -> Dict[str, Any]:
             CROSS APPLY sys.dm_exec_sql_text(blocking.sql_handle) bt
             CROSS APPLY sys.dm_exec_sql_text(blocked.sql_handle) kt
             WHERE blocked.blocking_session_id > 0""")
+        elif eng == "mysql":
+            rows = run_query(target, """
+            SELECT r.trx_mysql_thread_id AS blocked_session_id,
+                   b.trx_mysql_thread_id AS blocking_session_id,
+                   LEFT(b.trx_query, 300) AS blocking_query,
+                   LEFT(r.trx_query, 300) AS blocked_query,
+                   TIMESTAMPDIFF(SECOND, r.trx_wait_started, NOW()) AS wait_seconds,
+                   'innodb_lock' AS wait_type
+            FROM performance_schema.data_lock_waits w
+            JOIN information_schema.innodb_trx r ON r.trx_id = w.REQUESTING_ENGINE_TRANSACTION_ID
+            JOIN information_schema.innodb_trx b ON b.trx_id = w.BLOCKING_ENGINE_TRANSACTION_ID""")
         else:
             rows = run_query(target, """
             SELECT blocked.pid as blocked_session_id,
@@ -285,6 +332,22 @@ def get_query_plan(target: str = "", query_fragment: str = "") -> Dict[str, Any]
                 if r.get("plan_xml"):
                     r["plan_xml"] = r["plan_xml"][:1500] + "...(truncated)"
             return {"engine": eng, "plans": rows, "count": len(rows)}
+        if eng == "mysql":
+            stmts = run_query(target, f"""
+                SELECT DIGEST_TEXT FROM performance_schema.events_statements_summary_by_digest
+                WHERE DIGEST_TEXT LIKE '%{safe}%' AND SCHEMA_NAME NOT IN ('performance_schema','mysql','sys')
+                ORDER BY SUM_TIMER_WAIT DESC LIMIT 1""")
+            if not stmts:
+                return {"engine": eng, "plans": [], "count": 0,
+                        "note": f"'{query_fragment}' 매칭 쿼리가 performance_schema에 없음"}
+            q = stmts[0]["DIGEST_TEXT"]
+            if "?" in q:
+                return {"engine": eng, "matched_query": q[:500], "plans": [],
+                        "note": "다이제스트(? 파라미터) 쿼리는 자동 EXPLAIN 불가 — 원문으로 수동 EXPLAIN 권장"}
+            plan = run_query(target, f"EXPLAIN FORMAT=JSON {q}")
+            key = list(plan[0].keys())[0] if plan else None
+            return {"engine": eng, "matched_query": q[:500],
+                    "plan": str(plan[0][key])[:2000] if plan else None}
         # postgres: pg_stat_statements에서 문장 찾아 EXPLAIN (파라미터 쿼리는 EXPLAIN 불가할 수 있음)
         stmts = run_query(target, f"""
             SELECT query FROM pg_stat_statements
@@ -324,6 +387,15 @@ def get_wait_stats(target: str = "", hours_back: int = 24) -> Dict[str, Any]:
             WHERE i.start_time >= DATEADD(hour, -{int(hours_back)}, GETUTCDATE())
             ORDER BY w.avg_query_wait_time_ms DESC""")
             return {"engine": eng, "source": "query_store(windowed)", "wait_stats": rows, "count": len(rows)}
+        if eng == "mysql":
+            rows = run_query(target, """
+                SELECT EVENT_NAME AS wait_event, COUNT_STAR AS waits,
+                       ROUND(SUM_TIMER_WAIT/1e9, 1) AS total_wait_ms
+                FROM performance_schema.events_waits_summary_global_by_event_name
+                WHERE COUNT_STAR > 0 AND EVENT_NAME NOT LIKE 'idle%%'
+                ORDER BY SUM_TIMER_WAIT DESC LIMIT 20""")
+            return {"engine": eng, "source": "performance_schema(cumulative)",
+                    "wait_stats": rows, "count": len(rows)}
         rows = run_query(target, """
             SELECT wait_event_type, wait_event, count(*) as sessions,
                    array_agg(DISTINCT state) as states
@@ -363,6 +435,15 @@ def suggest_indexes(target: str = "", table_name: str = "") -> Dict[str, Any]:
             JOIN sys.dm_db_missing_index_group_stats s ON g.index_group_handle = s.group_handle
             WHERE d.database_id = DB_ID() {where} ORDER BY improvement DESC""")
             return {"engine": eng, "missing_indexes": rows, "count": len(rows)}
+        if eng == "mysql":
+            rows = run_query(target, """
+                SELECT object_schema AS db, object_name AS table_name,
+                       rows_full_scanned, latency
+                FROM sys.schema_tables_with_full_table_scans
+                ORDER BY rows_full_scanned DESC LIMIT 10""")
+            return {"engine": eng, "source": "sys.schema_tables_with_full_table_scans",
+                    "note": "풀스캔 많은 테이블 — WHERE 절 컬럼 분석 후 인덱스 후보. EXPLAIN으로 검증 권장",
+                    "index_candidates": rows, "count": len(rows)}
         safe = table_name.replace("'", "''") if table_name else ""
         where = f"AND relname = '{safe}'" if safe else ""
         rows = run_query(target, f"""
@@ -397,6 +478,12 @@ def get_index_usage(target: str = "") -> Dict[str, Any]:
             JOIN sys.indexes i ON s.object_id = i.object_id AND s.index_id = i.index_id
             WHERE s.database_id = DB_ID() AND OBJECTPROPERTY(s.object_id,'IsUserTable')=1
             ORDER BY s.user_updates DESC""")
+        elif eng == "mysql":
+            rows = run_query(target, """
+            SELECT object_schema AS db, object_name AS table_name, index_name
+            FROM sys.schema_unused_indexes LIMIT 20""")
+            return {"engine": eng, "source": "sys.schema_unused_indexes",
+                    "unused_indexes": rows, "count": len(rows)}
         else:
             rows = run_query(target, """
             SELECT s.relname as table_name, s.indexrelname as index_name,
@@ -431,6 +518,17 @@ def get_table_health(target: str = "") -> Dict[str, Any]:
             ORDER BY n_dead_tup DESC LIMIT 15""")
             return {"engine": eng, "table_health": rows, "count": len(rows),
                     "note": "dead_pct 높으면 VACUUM 필요 — autovacuum 동작 여부 확인"}
+        if eng == "mysql":
+            rows = run_query(target, """
+                SELECT TABLE_SCHEMA AS db, TABLE_NAME AS table_name, TABLE_ROWS AS approx_rows,
+                       ROUND(DATA_LENGTH/1024/1024, 1) AS data_mb,
+                       ROUND(DATA_FREE/1024/1024, 1) AS free_mb,
+                       CASE WHEN DATA_LENGTH > 0 THEN ROUND(DATA_FREE*100.0/(DATA_LENGTH+DATA_FREE), 1) ELSE 0 END AS frag_pct
+                FROM information_schema.TABLES
+                WHERE TABLE_SCHEMA NOT IN ('mysql','sys','performance_schema','information_schema')
+                ORDER BY DATA_FREE DESC LIMIT 15""")
+            return {"engine": eng, "table_health": rows, "count": len(rows),
+                    "note": "frag_pct 높으면 OPTIMIZE TABLE 검토"}
         rows = run_query(target, """
         SELECT TOP 15 OBJECT_NAME(ips.object_id) table_name, i.name index_name,
                CAST(ips.avg_fragmentation_in_percent AS DECIMAL(5,1)) frag_pct, ips.page_count
@@ -459,6 +557,13 @@ def get_connection_stats(target: str = "") -> Dict[str, Any]:
             return {"engine": eng, "by_state": rows,
                     "max_connections": mx[0].get("max_connections") if mx else None,
                     "note": "'idle in transaction'이 오래 남으면 락/베큠 지연 원인"}
+        if eng == "mysql":
+            rows = run_query(target, """
+                SELECT COMMAND AS state, COUNT(*) AS sessions, MAX(TIME) AS max_state_seconds
+                FROM information_schema.PROCESSLIST GROUP BY COMMAND ORDER BY sessions DESC""")
+            mx = run_query(target, "SHOW GLOBAL VARIABLES LIKE 'max_connections'")
+            return {"engine": eng, "by_state": rows,
+                    "max_connections": mx[0].get("Value") if mx else None}
         rows = run_query(target, """
         SELECT s.status, count(*) sessions
         FROM sys.dm_exec_sessions s WHERE s.is_user_process = 1

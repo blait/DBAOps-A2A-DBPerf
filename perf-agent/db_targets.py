@@ -3,7 +3,7 @@ db_targets.py - 분석 대상 DB 레지스트리 (멀티엔진).
 
 DB_TARGETS 환경변수(JSON)로 대상 목록을 정의한다. 각 항목:
   name    : 도구 호출 시 쓰는 식별자 (target 파라미터)
-  engine  : mssql | postgres
+  engine  : mssql | postgres | mysql
   자격증명: secret_id(Secrets Manager JSON {host,port,username,password})
            또는 host/port/username/password 직접 + password_secret_id(값만 시크릿)
   database: 기본 접속 DB (mssql: master, postgres: postgres)
@@ -69,8 +69,10 @@ def _resolve_creds(t: dict) -> dict:
     if t.get("password_secret_id"):
         sm = boto3.client("secretsmanager", region_name=AWS_REGION)
         creds["password"] = sm.get_secret_value(SecretId=t["password_secret_id"])["SecretString"]
-    creds.setdefault("port", 1433 if t["engine"] == "mssql" else 5432)
-    creds.setdefault("database", "master" if t["engine"] == "mssql" else "postgres")
+    default_port = {"mssql": 1433, "postgres": 5432, "mysql": 3306}[t["engine"]]
+    default_db = {"mssql": "master", "postgres": "postgres", "mysql": "mysql"}[t["engine"]]
+    creds.setdefault("port", default_port)
+    creds.setdefault("database", default_db)
     return creds
 
 
@@ -89,6 +91,11 @@ def get_connection(target: str):
         return psycopg2.connect(host=c["host"], user=c["username"], password=c["password"],
                                 port=int(c["port"]), dbname=c["database"],
                                 sslmode=c.get("sslmode", "prefer"), connect_timeout=15)
+    if t["engine"] == "mysql":
+        import pymysql
+        return pymysql.connect(host=c["host"], user=c["username"], password=c["password"],
+                               port=int(c["port"]), database=c["database"],
+                               connect_timeout=15, read_timeout=30)
     raise ValueError(f"unsupported engine '{t['engine']}'")
 
 
