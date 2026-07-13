@@ -1,0 +1,20 @@
+# DBAOps Slack 봇 — Socket Mode (공개 엔드포인트 불필요)
+# SLACK_BOT_TOKEN / SLACK_APP_TOKEN 이 /etc/dbaops/dbaops.env 에 있어야 기동.
+[Unit]
+Description=DBAOps Slack Bot
+After=network-online.target dbaops-agent.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=__USER__
+WorkingDirectory=__REPO__/slack_bot
+EnvironmentFile=/etc/dbaops/dbaops.env
+Environment=PYTHONPATH=__REPO__/ui/streamlit
+Environment=AGENT_HTTP_URL=http://127.0.0.1:8080/invocations
+ExecStart=__VENV__/bin/python bot.py
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

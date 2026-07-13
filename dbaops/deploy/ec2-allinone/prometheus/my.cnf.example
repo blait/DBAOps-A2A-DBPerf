@@ -1,0 +1,14 @@
+# mysqld-exporter 접속 설정. 이 파일을 my.cnf 로 복사해 실제 값으로 채운다.
+#   cp prometheus/my.cnf.example prometheus/my.cnf
+# my.cnf 는 비밀번호를 담으므로 커밋하지 않는다(.gitignore 대상).
+#
+# RDS 쪽 권한(모니터링 유저):
+#   GRANT PROCESS, REPLICATION CLIENT, SELECT ON *.* TO 'dbaops_admin'@'%';
+# (dbaops_admin 은 RDS master 라 이미 충분. 별도 모니터링 유저 분리 권장.)
+[client]
+host=dbaops-poc-mysql.cb9lthnbapty.ap-northeast-2.rds.amazonaws.com
+port=3306
+user=dbaops_admin
+password=CHANGE_ME
+# RDS 가 require_secure_transport=ON 이면 아래 주석 해제(TLS, 인증서 검증은 생략)
+# ssl-mode=REQUIRED

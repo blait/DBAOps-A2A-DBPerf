@@ -1,0 +1,22 @@
+{
+  "name": "sql_readonly",
+  "description": "Read-only SQL with sqlglot AST gate. SELECT/SHOW/DESCRIBE only.",
+  "input_schema": {
+    "type": "object",
+    "required": ["engine", "db_id", "sql"],
+    "properties": {
+      "engine": {"type": "string", "enum": ["postgres", "mysql"]},
+      "db_id":  {"type": "string"},
+      "sql":    {"type": "string"},
+      "params": {"type": "array"}
+    }
+  },
+  "output_schema": {
+    "type": "object",
+    "properties": {
+      "columns":   {"type": "array"},
+      "rows":      {"type": "array"},
+      "row_count": {"type": "integer"}
+    }
+  }
+}

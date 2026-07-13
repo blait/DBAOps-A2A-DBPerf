@@ -1,0 +1,148 @@
+# DBAOps-Agent 올인원 EC2 — AgentCore/Gateway/Cognito/Lambda 없이 단일 박스 구동.
+#
+#   streamlit ─┐
+#              ├─ HTTP/NDJSON ─> agent ─ MCP JSON-RPC ─> mcp-router ─> (DB/Prometheus/AWS)
+#   slack-bot ─┘
+#
+# 사전: 이 디렉토리에 .env 작성(.env.example 참고), connections.json 준비(연결설정 UI 가 write).
+# 실행: docker compose up -d --build
+#
+# 자격증명: EC2 instance role 을 컨테이너가 자동 사용(IMDS). 로컬 테스트 시 ~/.aws 마운트.
+
+x-aws-env: &aws-env
+  AWS_REGION: ${AWS_REGION:-ap-northeast-2}
+  BEDROCK_REGION: ${AWS_REGION:-ap-northeast-2}
+
+services:
+  mcp-router:
+    build:
+      context: ../..
+      dockerfile: mcp_router/Dockerfile
+    environment:
+      <<: *aws-env
+      MCP_ROUTER_PORT: "9000"
+      DBAOPS_DATA_DIR: /data
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    volumes:
+      - dbaops-data:/data
+      - ${AWS_SHARED_DIR:-/dev/null}:/root/.aws:ro
+    expose:
+      - "9000"
+    restart: unless-stopped
+
+  agent:
+    build:
+      context: ../../agent
+      dockerfile: Dockerfile
+    # agent Dockerfile 은 ARM64 고정 — x86 호스트 테스트 시 아래 platform 주석 해제
+    # platform: linux/arm64
+    environment:
+      <<: *aws-env
+      BEDROCK_MODEL_ID: ${BEDROCK_MODEL_ID:-global.anthropic.claude-opus-4-7}
+      GATEWAY_ENDPOINT: http://mcp-router:9000/mcp
+      DBAOPS_DATA_DIR: /data
+      PORT: "8080"
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    volumes:
+      - dbaops-data:/data
+      - ${AWS_SHARED_DIR:-/dev/null}:/root/.aws:ro
+    expose:
+      - "8080"
+    depends_on:
+      - mcp-router
+    restart: unless-stopped
+
+  streamlit:
+    build:
+      context: ../../ui/streamlit
+      dockerfile: Dockerfile
+    environment:
+      <<: *aws-env
+      AGENT_HTTP_URL: http://agent:8080/invocations
+      MCP_ROUTER_HEALTH_URL: http://mcp-router:9000/healthz
+      DBAOPS_DATA_DIR: /data
+      BEDROCK_MODEL_ID: ${BEDROCK_MODEL_ID:-global.anthropic.claude-opus-4-7}
+      SHOW_GENERATORS: "false"
+    volumes:
+      - dbaops-data:/data
+    ports:
+      - "${STREAMLIT_PORT:-8501}:8501"
+    depends_on:
+      - agent
+      - mcp-router
+    restart: unless-stopped
+
+  slack-bot:
+    build:
+      context: ../..
+      dockerfile: slack_bot/Dockerfile
+    environment:
+      <<: *aws-env
+      AGENT_HTTP_URL: http://agent:8080/invocations
+      SLACK_BOT_TOKEN: ${SLACK_BOT_TOKEN}
+      SLACK_APP_TOKEN: ${SLACK_APP_TOKEN}
+      STREAMLIT_URL: ${STREAMLIT_URL:-}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    depends_on:
+      - agent
+    restart: unless-stopped
+    # Slack 토큰 없으면 봇만 비활성화하려면: profiles: ["slack"] 후 --profile slack 으로 기동
+
+  # ── 선택: Prometheus 스택 (profiles: prometheus) ─────────────────────────────
+  # 고객이 Prometheus 를 운영하는 시나리오 데모용. RDS 는 관리형이라 직접 스크랩
+  # 불가 → exporter 가 DB 에 접속해 내부 지표(pg_stat_*, SHOW STATUS)를 뽑고,
+  # Prometheus 가 그 /metrics 를 pull 한다. 우리 MCP(community-prometheus)는
+  # connections.json 의 PROMETHEUS_URL=http://prometheus:9090 만 바라본다.
+  #   기동:   docker compose --profile prometheus up -d
+  #   기본 4개만: 프로파일 없이 docker compose up -d (이 3개는 안 뜸)
+  prometheus:
+    image: prom/prometheus:v2.54.1
+    profiles: ["prometheus"]
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    expose:
+      - "9090"
+    ports:
+      - "${PROMETHEUS_PORT:-9090}:9090"   # 데모용 외부 노출(선택) — SG 로 내 IP 한정
+    restart: unless-stopped
+
+  postgres-exporter:
+    image: quay.io/prometheuscommunity/postgres-exporter:v0.15.0
+    profiles: ["prometheus"]
+    environment:
+      # postgresql://user:pw@host:5432/db?sslmode=require  (.env 에 작성, PG 비번엔 $ 없음)
+      DATA_SOURCE_NAME: ${PG_EXPORTER_DSN}
+    expose:
+      - "9187"
+    restart: unless-stopped
+
+  mysqld-exporter:
+    image: prom/mysqld-exporter:v0.15.1
+    profiles: ["prometheus"]
+    # MySQL 비번에 특수문자($|]!>*)가 있어 .env 치환과 충돌 → my.cnf 파일 마운트.
+    # prometheus/my.cnf.example 복사 후 실제 host/user/password 채워 my.cnf 로 저장.
+    command:
+      - "--config.my-cnf=/cfg/.my.cnf"
+    volumes:
+      - ./prometheus/my.cnf:/cfg/.my.cnf:ro
+    expose:
+      - "9104"
+    restart: unless-stopped
+
+  # EC2 호스트(이 박스) CPU/메모리/디스크 — node_* 메트릭
+  node-exporter:
+    image: quay.io/prometheus/node-exporter:v1.8.2
+    profiles: ["prometheus"]
+    pid: host                       # 호스트 프로세스/CPU 통계 접근
+    command:
+      - "--path.rootfs=/host"
+    volumes:
+      - /:/host:ro,rslave           # 호스트 파일시스템 read-only 마운트
+    expose:
+      - "9100"
+    restart: unless-stopped
+
+volumes:
+  dbaops-data:
+  prometheus-data:

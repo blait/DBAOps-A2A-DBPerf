@@ -1,0 +1,30 @@
+{
+  "name": "prometheus_query",
+  "description": "Prometheus PromQL range query.",
+  "input_schema": {
+    "type": "object",
+    "required": ["promql", "start", "end"],
+    "properties": {
+      "promql": {"type": "string"},
+      "start":  {"type": "string", "description": "RFC3339"},
+      "end":    {"type": "string", "description": "RFC3339"},
+      "step":   {"type": "string", "default": "30s"}
+    }
+  },
+  "output_schema": {
+    "type": "object",
+    "properties": {
+      "series": {
+        "type": "array",
+        "items": {
+          "type": "object",
+          "required": ["ts", "value"],
+          "properties": {
+            "ts": {"type": "string"},
+            "value": {"type": "number"}
+          }
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,29 @@
+{
+  "name": "msk_metrics",
+  "description": "AWS/Kafka (MSK) CloudWatch metrics. Per-metric dimensions: BytesInPerSec/BytesOutPerSec/MessagesInPerSec require Cluster Name + Topic; MaxOffsetLag/SumOffsetLag/EstimatedMaxTimeLag require Cluster Name + Consumer Group + Topic. Handler auto-builds dimensions when topic/consumer_group are provided (defaults to dbaops.orders / dbaops-paused).",
+  "input_schema": {
+    "type": "object",
+    "required": ["cluster_arn", "metric", "start", "end"],
+    "properties": {
+      "cluster_arn":    {"type": "string", "description": "MSK cluster ARN. 'msk-cluster' placeholder 면 KAFKA_CLUSTER_NAME env 사용."},
+      "metric":         {"type": "string", "description": "예: BytesInPerSec, BytesOutPerSec, MessagesInPerSec, MaxOffsetLag, SumOffsetLag, UnderReplicatedPartitions"},
+      "start":          {"type": "string"},
+      "end":            {"type": "string"},
+      "stat":           {"type": "string", "description": "Average | Sum | Maximum | Minimum"},
+      "period":         {"type": "integer", "description": "초 단위, 기본 60"},
+      "topic":          {"type": "string", "description": "토픽 이름. BytesIn/Out/MessagesIn 류는 필수. 미지정 시 dbaops.orders."},
+      "consumer_group": {"type": "string", "description": "consumer group 이름. MaxOffsetLag/SumOffsetLag 에 필수. 미지정 시 dbaops-paused."},
+      "broker_id":      {"type": "string", "description": "Provisioned 클러스터에서 broker 단위 분석 시"},
+      "partition":      {"type": "string", "description": "partition 단위 분석 시"}
+    }
+  },
+  "output_schema": {
+    "type": "object",
+    "properties": {
+      "series":     {"type": "array"},
+      "dimensions": {"type": "array"},
+      "metric":     {"type": "string"},
+      "stat":       {"type": "string"}
+    }
+  }
+}

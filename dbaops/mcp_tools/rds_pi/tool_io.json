@@ -1,0 +1,21 @@
+{
+  "name": "rds_performance_insights",
+  "description": "RDS Performance Insights — top SQL by AAS for a given window. Handler accepts both DBInstanceIdentifier (e.g. 'dbaops-poc-aurora-pg-writer') and DbiResourceId ('db-XXXX'); DBInstanceIdentifier is auto-resolved via RDS DescribeDBInstances. group_by accepts a PI group prefix ('db.sql_tokenized' / 'db.wait_event' / 'db.host' / 'db.user' / 'db.application') OR a full dimension name (e.g. 'db.sql_tokenized.statement') — the handler truncates to prefix automatically. Returns {group, top_sql:[{label, statement, dimensions, aas}]}.",
+  "input_schema": {
+    "type": "object",
+    "required": ["db_id", "start", "end"],
+    "properties": {
+      "db_id":    {"type": "string", "description": "DBInstanceIdentifier (e.g. 'dbaops-poc-aurora-pg-writer') or DbiResourceId ('db-XXXX'). Both accepted."},
+      "start":    {"type": "string", "description": "ISO8601 UTC start time"},
+      "end":      {"type": "string", "description": "ISO8601 UTC end time"},
+      "group_by": {"type": "string", "description": "PI group prefix or dimension name. Default 'db.sql_tokenized'."}
+    }
+  },
+  "output_schema": {
+    "type": "object",
+    "properties": {
+      "group":   {"type": "string"},
+      "top_sql": {"type": "array"}
+    }
+  }
+}

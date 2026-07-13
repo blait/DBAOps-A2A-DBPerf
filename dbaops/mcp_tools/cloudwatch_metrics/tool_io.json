@@ -1,0 +1,23 @@
+{
+  "name": "cloudwatch_get_metric_data",
+  "description": "AWS CloudWatch GetMetricData (single metric).",
+  "input_schema": {
+    "type": "object",
+    "required": ["namespace", "metric", "start", "end"],
+    "properties": {
+      "namespace":  {"type": "string"},
+      "metric":     {"type": "string"},
+      "dimensions": {"type": "object", "additionalProperties": {"type": "string"}},
+      "start":      {"type": "string"},
+      "end":        {"type": "string"},
+      "stat":       {"type": "string", "default": "Average"},
+      "period":     {"type": "integer", "default": 60}
+    }
+  },
+  "output_schema": {
+    "type": "object",
+    "properties": {
+      "series": {"type": "array"}
+    }
+  }
+}

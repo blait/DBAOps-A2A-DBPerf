@@ -1,0 +1,368 @@
+{
+  "tools": [
+    {
+      "name": "describe_rds_instances",
+      "description": "AWS RDS DescribeDBInstances — RDS DB 인스턴스 메타정보(엔진/버전/엔드포인트/storage/PI 활성 여부 등) 조회.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "db_instance_identifier": {
+            "type": "string",
+            "description": "특정 인스턴스 id(예: dbaops-poc-mysql). 비우면 전체."
+          },
+          "max_records": {
+            "type": "integer",
+            "description": "20~100"
+          }
+        }
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "db_instances": {
+            "type": "array"
+          },
+          "count": {
+            "type": "integer"
+          }
+        }
+      }
+    },
+    {
+      "name": "describe_rds_clusters",
+      "description": "AWS RDS DescribeDBClusters — Aurora 클러스터/멤버(쓰기/리더/promotion_tier) 조회.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "db_cluster_identifier": {
+            "type": "string",
+            "description": "특정 클러스터 id(비우면 전체)."
+          }
+        }
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "db_clusters": {
+            "type": "array"
+          },
+          "count": {
+            "type": "integer"
+          }
+        }
+      }
+    },
+    {
+      "name": "describe_db_log_files",
+      "description": "AWS RDS DescribeDBLogFiles — RDS 인스턴스에 적재된 DB 엔진 로그 파일 목록(파일명/크기/마지막 갱신).",
+      "input_schema": {
+        "type": "object",
+        "required": [
+          "db_instance_identifier"
+        ],
+        "properties": {
+          "db_instance_identifier": {
+            "type": "string",
+            "description": "RDS DBInstanceIdentifier (필수)."
+          },
+          "filename_contains": {
+            "type": "string",
+            "description": "파일명 부분 필터 (예: 'slowquery', 'error', 'audit'). 비우면 전체."
+          }
+        }
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "log_files": {
+            "type": "array"
+          }
+        }
+      }
+    },
+    {
+      "name": "download_db_log_file_portion",
+      "description": "AWS RDS DownloadDBLogFilePortion — RDS 엔진 로그 파일에서 마지막 N 라인을 가져온다. marker 없이 호출하면 자동으로 끝까지 페이지를 돌며 누적. regex 가 있으면 매칭 라인만. log_file_name 은 describe_db_log_files 결과에서 가져오는 것을 권장.",
+      "input_schema": {
+        "type": "object",
+        "required": [
+          "db_instance_identifier",
+          "log_file_name"
+        ],
+        "properties": {
+          "db_instance_identifier": {
+            "type": "string",
+            "description": "RDS DBInstanceIdentifier (필수)."
+          },
+          "log_file_name": {
+            "type": "string",
+            "description": "describe_db_log_files 결과의 log_filename. 추측 말고 먼저 list 호출."
+          },
+          "marker": {
+            "type": "string",
+            "description": "이어 받을 marker(생략 시 끝까지 자동 페이징)"
+          },
+          "regex": {
+            "type": "string",
+            "description": "예: 'still waiting|deadlock', 'Query Text:|duration:' (slow query)"
+          },
+          "lines": {
+            "type": "integer",
+            "description": "마지막 N 라인 (기본 200, 최대 1000)"
+          }
+        }
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "lines": {
+            "type": "array"
+          },
+          "marker": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    {
+      "name": "describe_rds_events",
+      "description": "AWS RDS DescribeEvents — RDS/Aurora 이벤트 이력(failover, 재시작, 파라미터 변경 적용, 스토리지 autoscaling, 백업, 유지보수). RCA 에서 '그 시점에 뭐가 바뀌었나'를 확인할 때 가장 먼저 볼 도구. 최대 14일 전까지.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "source_identifier": {
+            "type": "string",
+            "description": "특정 리소스 id (예: dbaops-poc-mysql). 비우면 리전 전체 이벤트."
+          },
+          "source_type": {
+            "type": "string",
+            "description": "db-instance | db-cluster | db-parameter-group | db-security-group | db-snapshot (source_identifier 지정 시 기본 db-instance)"
+          },
+          "duration_minutes": {
+            "type": "integer",
+            "description": "지금부터 과거 N분 (기본 1440=24h, 최대 20160=14일)"
+          },
+          "categories": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "예: [\"failover\"], [\"configuration change\"], [\"availability\"]. 비우면 전체."
+          }
+        }
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "events": {
+            "type": "array"
+          },
+          "count": {
+            "type": "integer"
+          }
+        }
+      }
+    },
+    {
+      "name": "describe_db_recommendations",
+      "description": "AWS RDS DescribeDBRecommendations — AWS 가 자동 분석한 RDS 권장사항(rightsizing, 파라미터 튜닝, 버전 업그레이드, 성능 개선). 정기 점검이나 '개선할 것 없나' 질문에 사용.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "status": {
+            "type": "string",
+            "description": "active(기본) | pending | resolved | dismissed | all"
+          },
+          "severity": {
+            "type": "string",
+            "description": "high | medium | low | informational"
+          },
+          "max": {
+            "type": "integer",
+            "description": "기본 50, 최대 100"
+          }
+        }
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "recommendations": {
+            "type": "array"
+          },
+          "count": {
+            "type": "integer"
+          }
+        }
+      }
+    },
+    {
+      "name": "list_msk_clusters",
+      "description": "AWS Kafka(MSK) ListClustersV2 — MSK Provisioned/Serverless 클러스터 목록.",
+      "input_schema": {
+        "type": "object",
+        "properties": {}
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "clusters": {
+            "type": "array"
+          },
+          "count": {
+            "type": "integer"
+          }
+        }
+      }
+    },
+    {
+      "name": "describe_ec2_instances",
+      "description": "AWS EC2 DescribeInstances — EC2 인스턴스 상태/타입/AZ/Name 태그 조회.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "instance_ids": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "i-xxxx... 목록"
+          },
+          "tag_name_contains": {
+            "type": "string",
+            "description": "Name 태그 포함어 검색"
+          },
+          "max": {
+            "type": "integer",
+            "description": "기본 50, 최대 100"
+          }
+        }
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "instances": {
+            "type": "array"
+          },
+          "count": {
+            "type": "integer"
+          }
+        }
+      }
+    },
+    {
+      "name": "pi_create_analysis_report",
+      "description": "AWS Performance Insights CreatePerformanceAnalysisReport — 지정 구간의 DB 성능을 AWS 가 자동 분석한 리포트 생성(병목 인사이트 + 권고 포함). 생성에 수 분 걸릴 수 있음 — status=RUNNING 이면 잠시 후 pi_get_analysis_report 로 조회. 구간은 최소 5분, PI 보존기간(기본 7일) 내. '이 시간대 성능 분석 리포트 뽑아줘' 류 질문에 사용.",
+      "input_schema": {
+        "type": "object",
+        "required": [
+          "db_id",
+          "start",
+          "end"
+        ],
+        "properties": {
+          "db_id": {
+            "type": "string",
+            "description": "DBInstanceIdentifier 또는 DbiResourceId(db-XXXX). 둘 다 허용."
+          },
+          "start": {
+            "type": "string",
+            "description": "ISO8601 UTC (구간 최소 5분)"
+          },
+          "end": {
+            "type": "string",
+            "description": "ISO8601 UTC"
+          }
+        }
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "report_id": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string"
+          },
+          "insights": {
+            "type": "array"
+          }
+        }
+      }
+    },
+    {
+      "name": "pi_get_analysis_report",
+      "description": "AWS Performance Insights GetPerformanceAnalysisReport — 생성된 분석 리포트 조회. report_id 를 생략하면 해당 DB 의 리포트 목록을 반환.",
+      "input_schema": {
+        "type": "object",
+        "required": [
+          "db_id"
+        ],
+        "properties": {
+          "db_id": {
+            "type": "string",
+            "description": "DBInstanceIdentifier 또는 DbiResourceId"
+          },
+          "report_id": {
+            "type": "string",
+            "description": "pi_create_analysis_report 가 반환한 report_id. 생략 시 목록."
+          }
+        }
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "status": {
+            "type": "string"
+          },
+          "insights": {
+            "type": "array"
+          },
+          "reports": {
+            "type": "array"
+          }
+        }
+      }
+    },
+    {
+      "name": "describe_pi_dimensions",
+      "description": "AWS Performance Insights DescribeDimensionKeys — RDS PI 의 그룹별 top dimension(SQL/wait_event/host 등) 조회.",
+      "input_schema": {
+        "type": "object",
+        "required": [
+          "dbi_resource_id"
+        ],
+        "properties": {
+          "dbi_resource_id": {
+            "type": "string",
+            "description": "RDS DbiResourceId(예: db-XXXXXXXX)"
+          },
+          "metric": {
+            "type": "string",
+            "description": "예: db.load.avg"
+          },
+          "group_by": {
+            "type": "string",
+            "description": "PI group prefix: db.sql_tokenized | db.wait_event | db.host | db.user (default: db.sql_tokenized)"
+          },
+          "start": {
+            "type": "string"
+          },
+          "end": {
+            "type": "string"
+          }
+        }
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "metric": {
+            "type": "string"
+          },
+          "keys": {
+            "type": "array"
+          }
+        }
+      }
+    }
+  ]
+}

@@ -1,0 +1,3 @@
+run-mcp-servers-with-aws-lambda>=0.5.19
+postgres-mcp>=0.3.0
+boto3>=1.34.0

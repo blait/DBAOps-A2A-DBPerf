@@ -1,0 +1,18 @@
+{
+  "tools": [
+    {
+      "name": "mysql_query",
+      "description": "Execute a MySQL SQL query. Read-only (INSERT/UPDATE/DELETE blocked). Use SELECT against mysql.slow_log / performance_schema / information_schema / dbaops_* tables. EXPLAIN: this server's parser accepts only `EXPLAIN <SELECT|WITH>` — `EXPLAIN ANALYZE`, `EXPLAIN FORMAT=TREE/JSON` are rejected. For ANALYZE-style timings, query performance_schema.events_statements_summary_by_digest (sum_timer_wait, rows_examined, sum_no_index_used) instead.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "sql": {
+            "type": "string",
+            "description": "SQL query (SELECT only)."
+          }
+        },
+        "required": ["sql"]
+      }
+    }
+  ]
+}

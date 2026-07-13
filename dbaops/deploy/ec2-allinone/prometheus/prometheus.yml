@@ -1,0 +1,45 @@
+# DBAOps PoC — Prometheus scrape 설정.
+# RDS 는 관리형이라 직접 스크랩 불가 → exporter 가 DB 에 접속해 메트릭을 뽑고,
+# Prometheus 가 그 exporter 의 /metrics 를 pull 한다.
+#
+#   [postgres-exporter] ──접속──> 서울 RDS PG    ─┐
+#   [mysqld-exporter]   ──접속──> PoC RDS MySQL   ─┴─ scrape ─> [prometheus]
+#
+# 고객이 자신의 Prometheus 를 쓰는 경우, 이 파일 대신 고객 Prometheus 에
+# 동일한 job 을 추가하면 된다(우리 MCP 는 PROMETHEUS_URL 만 바라본다).
+
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+  external_labels:
+    env: dbaops-poc
+    region: ap-northeast-2
+
+scrape_configs:
+  - job_name: prometheus
+    static_configs:
+      - targets: ["localhost:9090"]
+
+  # 서울 RDS PostgreSQL (dbaops-seoul-test-pg) — pg_stat_* 내부 지표
+  - job_name: rds-postgres
+    static_configs:
+      - targets: ["postgres-exporter:9187"]
+        labels:
+          instance: dbaops-seoul-test-pg
+          engine: postgres
+
+  # PoC RDS MySQL (dbaops-poc-mysql / DB=dbaops)
+  - job_name: rds-mysql
+    static_configs:
+      - targets: ["mysqld-exporter:9104"]
+        labels:
+          instance: dbaops-poc-mysql
+          engine: mysql
+
+  # EC2 호스트(올인원 박스) — node_cpu/node_memory 등 OS 지표
+  - job_name: ec2-host
+    static_configs:
+      - targets: ["node-exporter:9100"]
+        labels:
+          instance: dbaops-seoul-allinone
+          role: host

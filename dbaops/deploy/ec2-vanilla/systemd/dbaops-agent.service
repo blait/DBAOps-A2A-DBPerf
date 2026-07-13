@@ -1,0 +1,21 @@
+# DBAOps Agent — LangGraph 에이전트 HTTP 서버 (:8080/invocations)
+[Unit]
+Description=DBAOps Agent
+After=network-online.target dbaops-mcp-router.service
+Wants=network-online.target
+Requires=dbaops-mcp-router.service
+
+[Service]
+Type=simple
+User=__USER__
+WorkingDirectory=__REPO__/agent
+EnvironmentFile=/etc/dbaops/dbaops.env
+Environment=GATEWAY_ENDPOINT=http://127.0.0.1:9000/mcp
+Environment=DBAOPS_DATA_DIR=__DATA__
+Environment=PORT=8080
+ExecStart=__VENV__/bin/python -m dbaops_agent.runtime_entry
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

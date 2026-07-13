@@ -1,0 +1,25 @@
+{
+  "aws_region": "ap-northeast-2",
+  "bedrock_model_id": "global.anthropic.claude-opus-4-7",
+  "tools": {
+    "rds-pi":               { "enabled": true },
+    "aws-api":              { "enabled": true },
+    "s3-log-fetch":         { "enabled": true },
+    "awslabs-cloudwatch":   { "enabled": true },
+    "awslabs-aws-doc":      { "enabled": true },
+    "awslabs-aws-api":      { "enabled": true },
+    "msk-metrics":          { "enabled": false, "KAFKA_CLUSTER_NAME": "", "KAFKA_DEFAULT_TOPIC": "", "KAFKA_DEFAULT_CG": "" },
+    "community-prometheus": { "enabled": false, "PROMETHEUS_URL": "http://10.0.0.10:9090" },
+    "community-postgres":   { "enabled": false, "PG_HOST": "", "PG_PORT": "5432", "PG_DBNAME": "postgres", "PG_USER": "", "PG_PASSWORD": "", "PG_SECRET_ARN": "", "PG_SSLMODE": "require" },
+    "community-mysql":      { "enabled": false, "MYSQL_HOST": "", "MYSQL_PORT": "3306", "MYSQL_DB": "mysql", "MYSQL_USER": "", "MYSQL_PASSWORD": "", "MYSQL_SECRET_ARN": "" }
+  },
+  "infra_context": {
+    "aurora_cluster_id": "",
+    "aurora_writer_id": "",
+    "aurora_reader_id": "",
+    "mysql_db_id": "",
+    "prom_instance_id": "",
+    "msk_cluster_name": "",
+    "log_bucket": ""
+  }
+}

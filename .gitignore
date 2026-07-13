@@ -1,0 +1,10 @@
+.env
+*.pem
+__pycache__/
+*.pyc
+.DS_Store
+connections.json
+my.cnf
+TEST_ACCESS.md
+.terraform/
+*.tfstate*

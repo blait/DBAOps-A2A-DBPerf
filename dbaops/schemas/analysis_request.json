@@ -1,0 +1,20 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://dbaops/agent/schemas/analysis_request.json",
+  "title": "AnalysisRequest",
+  "type": "object",
+  "required": ["time_range"],
+  "properties": {
+    "time_range": {
+      "type": "object",
+      "required": ["start", "end"],
+      "properties": {
+        "start": {"type": "string", "format": "date-time"},
+        "end":   {"type": "string", "format": "date-time"}
+      }
+    },
+    "targets":   {"type": "array", "items": {"type": "string"}},
+    "lens":      {"type": "string", "enum": ["os", "db", "log", "multi"]},
+    "free_text": {"type": "string"}
+  }
+}

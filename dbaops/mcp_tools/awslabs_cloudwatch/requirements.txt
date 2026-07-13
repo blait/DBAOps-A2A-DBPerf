@@ -1,0 +1,2 @@
+run-mcp-servers-with-aws-lambda>=0.5.19
+awslabs.cloudwatch-mcp-server>=0.1.2

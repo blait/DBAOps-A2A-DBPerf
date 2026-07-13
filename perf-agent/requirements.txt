@@ -1,0 +1,8 @@
+strands-agents[a2a]
+strands-agents-tools[a2a_client]
+mcp
+pymssql
+boto3
+streamlit
+httpx
+a2a-sdk

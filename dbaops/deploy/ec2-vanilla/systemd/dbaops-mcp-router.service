@@ -1,0 +1,25 @@
+# DBAOps MCP Router — tools/list + tools/call 서빙 (:9000)
+# install.sh 가 __PLACEHOLDER__ 를 실제 경로로 치환해 /etc/systemd/system/ 에 설치한다.
+[Unit]
+Description=DBAOps MCP Router
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=__USER__
+WorkingDirectory=__REPO__
+EnvironmentFile=/etc/dbaops/dbaops.env
+Environment=PYTHONPATH=__REPO__
+Environment=DBAOPS_DATA_DIR=__DATA__
+Environment=DBAOPS_MCP_TOOLS_DIR=__REPO__/mcp_tools
+Environment=MYSQL_MCP_ENTRY=__MYSQL_MCP__/node_modules/@benborla29/mcp-server-mysql/dist/index.js
+Environment=MCP_ROUTER_PORT=9000
+# stdio MCP 서버(postgres-mcp 등)가 venv/bin 에 설치되므로 PATH 에 포함 필수
+Environment=PATH=__VENV__/bin:/usr/local/bin:/usr/bin:/bin
+ExecStart=__VENV__/bin/python -m mcp_router.server
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

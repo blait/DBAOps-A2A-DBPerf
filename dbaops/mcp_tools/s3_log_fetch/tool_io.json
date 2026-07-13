@@ -1,0 +1,48 @@
+{
+  "tools": [
+    {
+      "name": "s3_log_fetch",
+      "description": "Fetch gzipped log lines from S3 with byte-range and regex match.",
+      "input_schema": {
+        "type": "object",
+        "required": ["bucket", "key"],
+        "properties": {
+          "bucket":     {"type": "string"},
+          "key":        {"type": "string", "description": "S3 object key (e.g. logs-burst/postgres/2026/05/17/11/...log.gz)"},
+          "byte_range": {"type": "array", "items": {"type": "integer"}},
+          "regex":      {"type": "string", "description": "Optional regex; only lines that match are returned."},
+          "max_lines":  {"type": "integer"}
+        }
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "lines":     {"type": "array"},
+          "truncated": {"type": "boolean"}
+        }
+      }
+    },
+    {
+      "name": "s3_list_logs",
+      "description": "List S3 log objects under a prefix — log specialist 가 어떤 key 가 존재하는지 먼저 탐색할 때 사용. since_minutes 로 최근 N 분 객체만 필터.",
+      "input_schema": {
+        "type": "object",
+        "required": ["bucket", "prefix"],
+        "properties": {
+          "bucket":         {"type": "string"},
+          "prefix":         {"type": "string", "description": "예: 'logs-burst/postgres/' or 'logs/mysql/2026/05/17/'"},
+          "max_keys":       {"type": "integer", "description": "최대 1000, 기본 100"},
+          "since_minutes":  {"type": "integer", "description": "최근 N 분 안에 last_modified 된 객체만"}
+        }
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "objects":      {"type": "array"},
+          "count":        {"type": "integer"},
+          "is_truncated": {"type": "boolean"}
+        }
+      }
+    }
+  ]
+}

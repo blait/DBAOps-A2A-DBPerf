@@ -1,0 +1,164 @@
+# DBAOps-A2A-DBPerf — DBAOps(ec2-allinone) + SQL Server Perf Agent, A2A로 연결.
+#
+#   ┌───────────── dbaops (기존 4개 서비스) ─────────────┐
+#   │ streamlit(8501) / slack-bot ─> agent(8080) ─> mcp-router │
+#   └────────────────────────────△─────────────────────┘
+#                                │ HTTP (mode=single)
+#   ┌──────────── perf (신규 3개 서비스) ────△───────────┐
+#   │ perf-streamlit(8502) ─A2A─> perf-a2a(9000) ⇄ ops-facade(9001) │
+#   │                              └ stdio MCP ─> SQL Server        │
+#   └───────────────────────────────────────────────────┘
+#
+# 사전: .env 작성(.env.example 참고). dbaops 쪽 connections.json은 UI로 설정.
+# 실행: docker compose up -d --build
+# dbaops 4개만: docker compose up -d mcp-router agent streamlit slack-bot
+
+x-aws-env: &aws-env
+  AWS_REGION: ${AWS_REGION:-ap-northeast-2}
+  BEDROCK_REGION: ${AWS_REGION:-ap-northeast-2}
+
+services:
+  # ─────────────── DBAOps ec2-allinone (원본 그대로) ───────────────
+  mcp-router:
+    build:
+      context: ./dbaops
+      dockerfile: mcp_router/Dockerfile
+    environment:
+      <<: *aws-env
+      MCP_ROUTER_PORT: "9000"
+      DBAOPS_DATA_DIR: /data
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    volumes:
+      - dbaops-data:/data
+      - ${AWS_SHARED_DIR:-/dev/null}:/root/.aws:ro
+    expose:
+      - "9000"
+    restart: unless-stopped
+
+  agent:
+    build:
+      context: ./dbaops/agent
+      dockerfile: Dockerfile
+    # agent Dockerfile은 ARM64 고정 — x86 호스트면 platform 주석 해제
+    # platform: linux/arm64
+    environment:
+      <<: *aws-env
+      BEDROCK_MODEL_ID: ${BEDROCK_MODEL_ID:-global.anthropic.claude-opus-4-7}
+      GATEWAY_ENDPOINT: http://mcp-router:9000/mcp
+      DBAOPS_DATA_DIR: /data
+      PORT: "8080"
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    volumes:
+      - dbaops-data:/data
+      - ${AWS_SHARED_DIR:-/dev/null}:/root/.aws:ro
+    expose:
+      - "8080"
+    depends_on:
+      - mcp-router
+    restart: unless-stopped
+
+  streamlit:
+    build:
+      context: ./dbaops/ui/streamlit
+      dockerfile: Dockerfile
+    environment:
+      <<: *aws-env
+      AGENT_HTTP_URL: http://agent:8080/invocations
+      MCP_ROUTER_HEALTH_URL: http://mcp-router:9000/healthz
+      DBAOPS_DATA_DIR: /data
+      BEDROCK_MODEL_ID: ${BEDROCK_MODEL_ID:-global.anthropic.claude-opus-4-7}
+      SHOW_GENERATORS: "false"
+    volumes:
+      - dbaops-data:/data
+    ports:
+      - "${STREAMLIT_PORT:-8501}:8501"
+    depends_on:
+      - agent
+      - mcp-router
+    restart: unless-stopped
+
+  slack-bot:
+    build:
+      context: ./dbaops
+      dockerfile: slack_bot/Dockerfile
+    environment:
+      <<: *aws-env
+      AGENT_HTTP_URL: http://agent:8080/invocations
+      SLACK_BOT_TOKEN: ${SLACK_BOT_TOKEN}
+      SLACK_APP_TOKEN: ${SLACK_APP_TOKEN}
+      STREAMLIT_URL: ${STREAMLIT_URL:-}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    depends_on:
+      - agent
+    restart: unless-stopped
+
+  # ─────────────── SQL Server Perf Agent (신규) ───────────────
+  perf-a2a:
+    build:
+      context: ./perf-agent
+    command: ["python", "a2a_perf_server.py"]
+    environment:
+      <<: *aws-env
+      BEDROCK_MODEL_ID: ${PERF_BEDROCK_MODEL_ID:-global.anthropic.claude-sonnet-4-5-20250929-v1:0}
+      DB_SECRET_ID: ${DB_SECRET_ID:-dbops-sqlserver-secret}
+      DB_NAME: ${DB_NAME:-master}
+      A2A_PERF_HOST: 0.0.0.0
+      A2A_PERF_PORT: "9000"
+      A2A_PERF_URL: http://perf-a2a:9000
+      OPS_A2A_URL: http://ops-facade:9001
+      SLACK_BOT_TOKEN: ${SLACK_BOT_TOKEN:-}
+      SLACK_CHANNEL: ${SLACK_CHANNEL:-}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    volumes:
+      - ${AWS_SHARED_DIR:-/dev/null}:/root/.aws:ro
+    expose:
+      - "9000"
+    restart: unless-stopped
+
+  ops-facade:
+    build:
+      context: ./perf-agent
+    command: ["python", "a2a_ops_server.py"]
+    environment:
+      <<: *aws-env
+      BEDROCK_MODEL_ID: ${PERF_BEDROCK_MODEL_ID:-global.anthropic.claude-sonnet-4-5-20250929-v1:0}
+      DBAOPS_AGENT_URL: http://agent:8080/invocations
+      A2A_OPS_HOST: 0.0.0.0
+      A2A_OPS_PORT: "9001"
+      A2A_OPS_URL: http://ops-facade:9001
+      PERF_A2A_URL: http://perf-a2a:9000
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    volumes:
+      - ${AWS_SHARED_DIR:-/dev/null}:/root/.aws:ro
+    expose:
+      - "9001"
+    depends_on:
+      - agent
+    restart: unless-stopped
+
+  perf-streamlit:
+    build:
+      context: ./perf-agent
+    command: ["streamlit", "run", "streamlit_app.py",
+              "--server.port", "8501", "--server.address", "0.0.0.0",
+              "--server.headless", "true"]
+    environment:
+      <<: *aws-env
+      DB_SECRET_ID: ${DB_SECRET_ID:-dbops-sqlserver-secret}
+      DB_NAME: ${DB_NAME:-master}
+      PERF_A2A_URL: http://perf-a2a:9000
+      OPS_A2A_URL: http://ops-facade:9001
+      DBAOPS_AGENT_URL: http://agent:8080/invocations
+      SLACK_BOT_TOKEN: ${SLACK_BOT_TOKEN:-}
+      SLACK_CHANNEL: ${SLACK_CHANNEL:-}
+    volumes:
+      - ${AWS_SHARED_DIR:-/dev/null}:/root/.aws:ro
+    ports:
+      - "${PERF_STREAMLIT_PORT:-8502}:8501"
+    depends_on:
+      - perf-a2a
+      - ops-facade
+    restart: unless-stopped
+
+volumes:
+  dbaops-data:

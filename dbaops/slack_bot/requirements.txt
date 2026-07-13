@@ -1,0 +1,6 @@
+slack-bolt>=1.18.0
+# agentcore_client 는 AGENT_HTTP_URL 모드에서 urllib 만 사용(표준 라이브러리).
+# AgentCore 모드도 지원하려면 boto3 추가:
+boto3>=1.34.0
+# 차트 PNG 렌더(Slack 첨부용)
+matplotlib>=3.8.0
