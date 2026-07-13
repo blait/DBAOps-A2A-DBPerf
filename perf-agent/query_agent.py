@@ -9,7 +9,7 @@ build_mcp_client() / build_perf_agent() are reused by:
   - CLI interactive mode (python3.11 query_agent.py)
 
 If ENABLE_A2A=1 (default), the agent also gets A2A client tools so it can
-consult the DBAOps ops agent facade at OPS_A2A_URL (:9101).
+consult the DBAOps RCA agent at OPS_A2A_URL (:9102, native A2A).
 """
 import os
 import sys
@@ -23,7 +23,7 @@ AWS_REGION = os.environ.get('AWS_REGION', 'ap-northeast-2')
 # perf 전용 모델(PERF_BEDROCK_MODEL_ID) 우선 — DBAOps의 BEDROCK_MODEL_ID(opus)와 분리.
 BEDROCK_MODEL_ID = os.environ.get('PERF_BEDROCK_MODEL_ID') or os.environ.get(
     'BEDROCK_MODEL_ID', 'global.anthropic.claude-sonnet-4-5-20250929-v1:0')
-OPS_A2A_URL = os.environ.get('OPS_A2A_URL', 'http://127.0.0.1:9101')
+OPS_A2A_URL = os.environ.get('OPS_A2A_URL', 'http://127.0.0.1:9102')
 ENABLE_A2A = os.environ.get('ENABLE_A2A', '1') == '1'
 
 

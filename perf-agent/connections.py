@@ -5,7 +5,7 @@ connections.py - 연동 서비스 관리.
   - RDS SQL Server (Secrets Manager 자격증명)
   - Slack (Bot Token — 기존 DBAOps slack-bot과 동일한 토큰 방식)
   - DBAOps Agent (vanilla systemd, 127.0.0.1:8080 HTTP)
-  - A2A peer 서버들 (performance :9100 / dbaops facade :9101)
+  - A2A peer 서버들 (performance :9100 / dbaops native A2A :9102)
 
 Slack은 webhook이 아니라 **Bot Token(xoxb-…) + chat.postMessage** 방식.
 토큰은 환경변수 SLACK_BOT_TOKEN(권장, .env → compose) 또는
@@ -36,7 +36,7 @@ SLACK_CHANNEL = os.environ.get('SLACK_CHANNEL', '')  # 알림 기본 채널 (예
 DBAOPS_AGENT_URL = os.environ.get('DBAOPS_AGENT_URL', 'http://127.0.0.1:8080/invocations')
 
 PERF_A2A_URL = os.environ.get('PERF_A2A_URL', 'http://127.0.0.1:9100')
-OPS_A2A_URL = os.environ.get('OPS_A2A_URL', 'http://127.0.0.1:9101')
+OPS_A2A_URL = os.environ.get('OPS_A2A_URL', 'http://127.0.0.1:9102')
 
 
 # ───────────────────────── Slack (Bot Token) ─────────────────────────
@@ -148,7 +148,7 @@ def check_all() -> dict:
         'slack': check_slack(),
         'dbaops_agent': check_dbaops_agent(),
         'a2a_performance_agent': check_a2a(PERF_A2A_URL),
-        'a2a_dbaops_facade': check_a2a(OPS_A2A_URL),
+        'a2a_dbaops': check_a2a(OPS_A2A_URL),
     }
 
 

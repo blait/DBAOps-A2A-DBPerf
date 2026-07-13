@@ -1,7 +1,7 @@
 # SQL Server Perf Streamlit UI (:8502) — perf/ops 채팅 + 연동 관리.
 [Unit]
 Description=DBPerf Streamlit UI
-After=network-online.target dbperf-a2a.service dbperf-ops-facade.service
+After=network-online.target dbperf-a2a.service dbaops-a2a.service
 Wants=network-online.target
 
 [Service]
@@ -11,7 +11,7 @@ WorkingDirectory=__PERF__
 EnvironmentFile=/etc/dbaops/dbaops.env
 Environment=PERF_BEDROCK_MODEL_ID=global.anthropic.claude-sonnet-4-5-20250929-v1:0
 Environment=PERF_A2A_URL=http://127.0.0.1:9100
-Environment=OPS_A2A_URL=http://127.0.0.1:9101
+Environment=OPS_A2A_URL=http://127.0.0.1:9102
 Environment=DBAOPS_AGENT_URL=http://127.0.0.1:8080/invocations
 ExecStart=__VENV__/bin/streamlit run streamlit_app.py --server.port=8502 --server.address=0.0.0.0 --server.headless=true
 Restart=always

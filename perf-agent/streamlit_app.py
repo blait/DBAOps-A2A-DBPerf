@@ -3,7 +3,7 @@ streamlit_app.py - Query Performance Agent Streamlit UI (DBAOps-Agent 스타일)
 
 탭 3개:
   ⚡ Query Performance — 우리 perf 에이전트와 채팅 (A2A :9100 경유)
-  🧭 DBAOps Ops Agent  — DBAOps 파사드와 채팅 (A2A :9101 경유)
+  🧭 DBAOps Ops Agent  — DBAOps RCA 에이전트와 채팅 (native A2A :9102)
   🔌 연동 관리          — DB/Slack/A2A/Runtime 상태 확인, Slack 등록·테스트
 
 두 채팅 탭 모두 A2A 서버를 통해 호출하므로, 에이전트 간(A2A) 경로와
@@ -26,7 +26,7 @@ import connections
 
 st.set_page_config(page_title="SQL Server DBOps", layout="wide")
 st.title("SQL Server DBOps — Query Performance × DBAOps")
-st.caption("stdio MCP 도구 13개 + A2A 연동 (perf :9100 ↔ ops facade :9101 ↔ DBAOps agent :8080)")
+st.caption("stdio MCP 도구 13개 + native A2A 연동 (perf :9100 ↔ DBAOps :9102)")
 
 AGENTS = [
     {
@@ -42,7 +42,7 @@ AGENTS = [
         "tab": "🧭 DBAOps Ops Agent",
         "url": connections.OPS_A2A_URL,
         "desc": "OS·인프라 메트릭 / Aurora PG / RDS MySQL / Kafka / 로그 RCA — "
-                "DBAOps agent(vanilla systemd)를 A2A 파사드로 호출.",
+                "DBAOps RCA 에이전트(native A2A)와 직접 통신.",
         "example": "예: 'EC2 최근 1시간 CPU peak 시점과 baseline 대비 격차'",
     },
 ]
@@ -144,7 +144,7 @@ def render_connections_tab() -> None:
         "slack": ("💬 Slack", "Bot Token (chat.postMessage)"),
         "dbaops_agent": ("🧭 DBAOps Agent", "DBAOps agent (127.0.0.1:8080)"),
         "a2a_performance_agent": ("🔗 A2A — Perf Agent :9100", "우리 쿼리 성능 에이전트"),
-        "a2a_dbaops_facade": ("🔗 A2A — Ops Facade :9101", "DBAOps 파사드"),
+        "a2a_dbaops_facade": ("🔗 A2A — DBAOps :9102", "DBAOps native A2A 서버"),
     }
     for key, status in st.session_state["conn_status"].items():
         label, hint = labels.get(key, (key, ""))
@@ -193,9 +193,9 @@ with st.sidebar:
         "Streamlit :8502\n"
         "  ├─ A2A → perf agent :9100\n"
         "  │         └─ stdio MCP (13 tools)\n"
-        "  │         └─ A2A → ops facade :9101\n"
-        "  └─ A2A → ops facade :9101\n"
-        "            └─ DBAOps agent :8080\n"
+        "  │         └─ A2A → DBAOps :9102\n"
+        "  └─ A2A → DBAOps :9102 (native)\n"
+        "            └─ single_graph → MCP router :9000\n"
         "            └─ A2A → perf agent :9100",
         language=None,
     )

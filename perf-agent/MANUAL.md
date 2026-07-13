@@ -1,7 +1,7 @@
 # SQL Server Perf Agent — 매뉴얼
 
 DBAOps와 **A2A 프로토콜로 상호 연동**되는 SQL Server 쿼리 성능 에이전트.
-docker 없이 **venv + systemd**로 DBAOps 4개 + perf 3개 서비스가 한 EC2 호스트에서 함께 돈다.
+docker 없이 **venv + systemd**로 DBAOps 4개 + dbaops-a2a + perf 2개 서비스가 한 EC2 호스트에서 함께 돈다.
 
 ```
         사용자 (브라우저)
@@ -11,30 +11,33 @@ docker 없이 **venv + systemd**로 DBAOps 4개 + perf 3개 서비스가 한 EC2
      :8501           (⚡ perf 채팅 / 🧭 ops 채팅 / 🔌 연동 관리)
      │                  │ A2A            │ A2A
      ▼                  ▼                ▼
- ┌────────┐  HTTP  ┌────────────────┐ A2A ┌──────────────┐
- │ agent  │◀───────│ dbperf-ops-    │◀───▶│  dbperf-a2a  │
- │ :8080  │        │ facade :9101   │     │   :9100      │
- └───┬────┘        └────────────────┘     └──────┬───────┘
-     │ MCP                             stdio MCP (도구 13개)
-     ▼                                        │ pymssql
- dbaops-mcp-router :9000                       ▼
-   → Aurora/MySQL/Kafka/Prometheus     RDS SQL Server
+ ┌──────────────┐  A2A(native)  ┌──────────────┐
+ │  dbaops-a2a  │◀─────────────▶│  dbperf-a2a  │
+ │    :9102     │               │   :9100      │
+ └──────┬───────┘               └──────┬───────┘
+        │ invoke_single         stdio MCP (도구 13개)
+        ▼                              │ pymssql
+ dbaops-mcp-router :9000               ▼
+   → Aurora/MySQL/Kafka/Prometheus  RDS SQL Server
+ dbaops-agent :8080 (HTTP, DBAOps 자체 UI/Slack용)
  dbaops-slack-bot(@DBAOps 멘션) → agent :8080
 ```
 
 - **dbperf-a2a (:9100)** — SQL Server 쿼리 성능 전문가. stdio MCP 도구 13개(진단 12 + Slack 알림 1).
-  ops-facade에 A2A client로 물어볼 수 있음(양방향).
-- **dbperf-ops-facade (:9101)** — DBAOps agent(127.0.0.1:8080/invocations, HTTP)는 A2A를 모르므로
-  A2A ↔ HTTP 변환 파사드. perf-a2a에 대한 A2A client 도구도 가짐.
+  dbaops-a2a에 A2A client로 물어볼 수 있음(양방향).
+- **dbaops-a2a (:9102)** — DBAOps RCA 에이전트를 A2A로 직접 노출(native). `dbaops/a2a_server.py`가
+  DBAOps `invoke_single`을 a2a-sdk로 감쌈. dbperf-a2a에 대한 A2A client 도구도 가짐.
+  **파사드/HTTP 변환 없음** — 두 A2A 서버가 직접 대화.
 - 무한 위임 루프는 시스템 프롬프트의 역할 경계로 방지 — perf는 SQL Server 질문을
-  절대 위임하지 않고, ops-facade는 SQL Server 컨텍스트가 필요할 때만 perf에 위임.
-- 포트는 DBAOps(9000/8080/8501)와 겹치지 않게 9100/9101/8502로 배치.
+  절대 위임하지 않고, dbaops는 SQL Server 컨텍스트가 필요할 때만 perf에 위임.
+- 포트는 DBAOps(9000/8080/8501)와 겹치지 않게 9100/9102/8502로 배치.
+- `dbaops-agent(:8080)`는 DBAOps 자체 UI·Slack봇 전용 HTTP로 계속 남는다(A2A 경로와 무관).
 
 ---
 
 ## 1. 기동
 
-루트 `deploy/install.sh`가 DBAOps(vanilla)와 함께 이 3개 유닛을 설치·기동한다.
+루트 `deploy/install.sh`가 DBAOps(vanilla)와 함께 dbaops-a2a·perf 유닛을 설치·기동한다.
 
 ```bash
 cd ~/DBAOps-A2A-DBPerf && bash deploy/install.sh
@@ -43,12 +46,12 @@ cd ~/DBAOps-A2A-DBPerf && bash deploy/install.sh
 | systemd 유닛 | 포트 | 역할 |
 |---|---|---|
 | `dbperf-a2a` | 9100 (내부) | Query Performance 에이전트 A2A 서버 |
-| `dbperf-ops-facade` | 9101 (내부) | DBAOps A2A 파사드 |
+| `dbaops-a2a` | 9102 (내부) | DBAOps RCA 에이전트 A2A 서버 (native) |
 | `dbperf-streamlit` | **8502** (외부) | Perf Streamlit UI |
 
 ```bash
-systemctl status dbperf-a2a dbperf-ops-facade dbperf-streamlit --no-pager
-sudo systemctl restart dbperf-ops-facade
+systemctl status dbperf-a2a dbaops-a2a dbperf-streamlit --no-pager
+sudo systemctl restart dbaops-a2a
 journalctl -u dbperf-a2a -f
 ```
 
@@ -57,7 +60,7 @@ journalctl -u dbperf-a2a -f
 ### 2-1. Streamlit UI — http://\<host\>:8502
 
 - **⚡ Query Performance 탭** — SQL Server 쿼리 성능 질문
-- **🧭 DBAOps Ops Agent 탭** — OS/Aurora/MySQL/Kafka/로그 질문 (파사드 경유)
+- **🧭 DBAOps Ops Agent 탭** — OS/Aurora/MySQL/Kafka/로그 질문 (dbaops-a2a 경유)
 - **🔌 연동 관리 탭** — DB/Slack/DBAOps agent/A2A×2 상태 확인, Slack 테스트
 
 ### 2-2. CLI
@@ -72,17 +75,17 @@ $VENV/bin/python /path/to/perf-agent/connections.py status
 
 ```bash
 curl -s http://127.0.0.1:9100/.well-known/agent-card.json | python3 -c 'import sys,json;print(json.load(sys.stdin)["name"])'
-curl -s http://127.0.0.1:9101/.well-known/agent-card.json | python3 -c 'import sys,json;print(json.load(sys.stdin)["name"])'
+curl -s http://127.0.0.1:9102/.well-known/agent-card.json | python3 -c 'import sys,json;print(json.load(sys.stdin)["name"])'
 ```
 
 Python 클라이언트 예시는 [AGENT_GUIDE.md](AGENT_GUIDE.md) 사용례 8 참고.
 
 ## 3. 에이전트 간 협업 (A2A)
 
-- **perf → ops**: perf 탭에 "SQL Server 쿼리는 네가 보고, 같은 시간대 호스트 CPU는 ops한테
-  물어봐서 종합해줘" → perf가 `a2a_send_message`로 ops-facade(:9101)에 질문 → 파사드가
-  agent(:8080) HTTP 호출 → 종합 리포트.
-- **ops → perf**: ops 탭에 "인프라 점검하고 SQL Server 느린 쿼리도 같이" → 파사드가
+- **perf → dbaops**: perf 탭에 "SQL Server 쿼리는 네가 보고, 같은 시간대 호스트 CPU는
+  DBAOps한테 물어봐서 종합해줘" → perf가 `a2a_send_message`로 dbaops-a2a(:9102)에 A2A 질문 →
+  dbaops-a2a가 `invoke_single`로 분석 → 답변 반환 → perf가 종합 리포트.
+- **dbaops → perf**: ops 탭에 "인프라 점검하고 SQL Server 느린 쿼리도 같이" → dbaops-a2a가
   DBAOps 분석 + `a2a_send_message`로 perf(:9100)에 질문 → 합쳐서 답변.
 
 ## 4. 연동 설정 (공유 env: /etc/dbaops/dbaops.env)
@@ -103,7 +106,7 @@ SLACK_CHANNEL=#dbops-alerts  # perf 알림 기본 채널
   (봇을 해당 채널에 `/invite` 해야 함)
 - 테스트: `/opt/dbaops/venv/bin/python connections.py test-slack`
 - 토큰을 env 대신 SSM에 둘 수도 있음: `SLACK_BOT_TOKEN_PARAM=/dbops/slack/bot_token` (SecureString)
-- env 수정 후: `sudo systemctl restart dbperf-a2a dbperf-ops-facade dbperf-streamlit`
+- env 수정 후: `sudo systemctl restart dbperf-a2a dbaops-a2a dbperf-streamlit`
 
 ### 4-2. DB 자격증명
 
@@ -126,13 +129,13 @@ aws secretsmanager put-secret-value --secret-id dbops-sqlserver-secret --region 
 
 | 변수 | 기본값 | 설명 |
 |---|---|---|
-| `PERF_BEDROCK_MODEL_ID` | claude-sonnet-4-5 | perf/파사드 LLM (env) |
+| `PERF_BEDROCK_MODEL_ID` | claude-sonnet-4-5 | perf/dbaops-a2a LLM (env) |
 | `BEDROCK_MODEL_ID` | claude-opus-4-7 | (DBAOps용, perf는 PERF_ 우선) |
 | `DB_SECRET_ID` | dbops-sqlserver-secret | DB 자격증명 시크릿 (env) |
 | `DB_NAME` | master | 분석 대상 데이터베이스 (env) |
 | `SLACK_BOT_TOKEN` / `SLACK_CHANNEL` | — | Slack 알림 (bot token, env) |
 | `DBAOPS_AGENT_URL` | http://127.0.0.1:8080/invocations | DBAOps agent (유닛에 고정) |
-| `PERF_A2A_URL` / `OPS_A2A_URL` | 127.0.0.1:9100 / :9101 | A2A 주소 (유닛에 고정) |
+| `PERF_A2A_URL` / `OPS_A2A_URL` | 127.0.0.1:9100 / :9102 | A2A 주소 (유닛에 고정) |
 | `ENABLE_A2A` | 1 | perf의 A2A client 도구 on/off |
 
 > perf는 `PERF_BEDROCK_MODEL_ID`를 코드 기본값으로 쓴다. 유닛이 넘기지 않으면 코드 기본값
@@ -157,8 +160,8 @@ get_expensive_queries_from_cache, suggest_indexes, get_index_usage
 |---|---|---|
 | perf 탭 "A2A 호출 실패" | `systemctl status dbperf-a2a`, `journalctl -u dbperf-a2a` | 유닛 재시작 |
 | "Login failed for user" | `connections.py test-db` | 시크릿 비밀번호 (§4-2) |
-| ops 탭 error | `journalctl -u dbperf-ops-facade`, `-u dbaops-agent` | agent 기동/Bedrock 권한 |
+| ops 탭 error | `journalctl -u dbaops-a2a`, `-u dbaops-agent` | agent 기동/Bedrock 권한 |
 | Slack `not_in_channel` | — | 해당 채널에서 `/invite @DBAOps` |
 | Slack `invalid_auth` | `connections.py status` | SLACK_BOT_TOKEN 값/만료 확인 |
 | 포트 8502 안 열림 | `ss -ltnp \| grep 8502` | dbperf-streamlit 상태/SG 인바운드 |
-| 응답이 매우 느림 | — | 정상 범위. 도구 다수 + LLM 왕복, ops 경유는 수 분 |
+| 응답이 매우 느림 | — | 정상 범위. 도구 다수 + LLM 왕복, dbaops 경유는 수 분 |

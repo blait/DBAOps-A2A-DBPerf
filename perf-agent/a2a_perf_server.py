@@ -1,7 +1,7 @@
 """
 a2a_perf_server.py - Query Performance 에이전트를 A2A 프로토콜로 노출 (:9100).
 
-DBAOps ops agent(파사드 :9101)나 다른 A2A 클라이언트가 이 서버로
+DBAOps RCA agent(native A2A :9102)나 다른 A2A 클라이언트가 이 서버로
 SQL Server 쿼리 성능 질문을 보낼 수 있다.
 
 Agent card: http://<host>:9100/.well-known/agent-card.json
@@ -23,7 +23,7 @@ HTTP_URL = os.environ.get('A2A_PERF_URL', f"http://127.0.0.1:{PORT}")
 def main():
     mcp_client = build_mcp_client()
     with mcp_client:
-        # 양방향 A2A: 이 서버의 에이전트도 ops 파사드(:9101)에 물어볼 수 있다.
+        # 양방향 A2A: 이 서버의 에이전트도 DBAOps native A2A(:9102)에 물어볼 수 있다.
         # 무한 위임 루프는 시스템 프롬프트의 역할 경계로 방지 —
         # perf는 SQL Server 질문을 절대 위임하지 않고, ops는 SQL Server 컨텍스트만 위임한다.
         agent = build_perf_agent(mcp_client)

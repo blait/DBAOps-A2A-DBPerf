@@ -37,6 +37,9 @@ echo "==> [2/2] SQL Server Perf 에이전트 설치"
 echo "    pip install (perf-agent/requirements.txt) — pymssql/strands/a2a/streamlit"
 "$VENV/bin/pip" install -q -r "$PERF_DIR/requirements.txt"
 
+echo "    pip install (DBAOps native A2A 서버용 a2a-sdk/uvicorn)"
+"$VENV/bin/pip" install -q a2a-sdk uvicorn
+
 echo "    perf env 기본값 추가 (없을 때만)"
 if ! sudo grep -q '^DB_SECRET_ID=' "$ENV_FILE" 2>/dev/null; then
   sudo tee -a "$ENV_FILE" >/dev/null <<'PERFENV'
@@ -50,8 +53,17 @@ DB_NAME=master
 PERFENV
 fi
 
-echo "    systemd 유닛 설치 (dbperf-a2a / dbperf-ops-facade / dbperf-streamlit)"
-for unit in dbperf-a2a dbperf-ops-facade dbperf-streamlit; do
+echo "    systemd 유닛 설치 (dbaops-a2a / dbperf-a2a / dbperf-streamlit)"
+# DBAOps native A2A (dbaops 리포 경로 + data + venv 치환)
+DATA_DIR="$INSTALL_DIR/data"
+sed -e "s|__DBAOPS__|$DBAOPS_DIR|g" \
+    -e "s|__VENV__|$VENV|g" \
+    -e "s|__DATA__|$DATA_DIR|g" \
+    -e "s|__USER__|$RUN_USER|g" \
+    "$REPO_ROOT/deploy/systemd/dbaops-a2a.service" | \
+  sudo tee "$UNIT_DIR/dbaops-a2a.service" >/dev/null
+# Perf 유닛
+for unit in dbperf-a2a dbperf-streamlit; do
   sed -e "s|__PERF__|$PERF_DIR|g" \
       -e "s|__VENV__|$VENV|g" \
       -e "s|__USER__|$RUN_USER|g" \
@@ -59,12 +71,13 @@ for unit in dbperf-a2a dbperf-ops-facade dbperf-streamlit; do
     sudo tee "$UNIT_DIR/$unit.service" >/dev/null
 done
 sudo systemctl daemon-reload
-sudo systemctl enable --now dbperf-a2a dbperf-ops-facade dbperf-streamlit
+sudo systemctl enable --now dbaops-a2a dbperf-a2a dbperf-streamlit
 
 echo ""
 echo "완료. 확인:"
-echo "  systemctl status dbaops-agent dbperf-a2a dbperf-ops-facade dbperf-streamlit --no-pager"
+echo "  systemctl status dbaops-agent dbaops-a2a dbperf-a2a dbperf-streamlit --no-pager"
 echo "  curl -s http://localhost:9100/.well-known/agent-card.json | python3 -c 'import sys,json;print(json.load(sys.stdin)[\"name\"])'"
+echo "  curl -s http://localhost:9102/.well-known/agent-card.json | python3 -c 'import sys,json;print(json.load(sys.stdin)[\"name\"])'"
 echo "  브라우저: http://<EC2-IP>:8501 (DBAOps)   http://<EC2-IP>:8502 (Perf)"
 echo ""
 echo "다음: /etc/dbaops/dbaops.env 에 DB 시크릿/Slack 채널 확인 후"
