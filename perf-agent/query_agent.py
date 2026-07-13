@@ -65,17 +65,13 @@ SYSTEM_PROMPT = """You are an RDS SQL Server query performance optimization spec
 5. **ONLY send Slack alerts when explicitly requested in the user's prompt**
 
 **Collaborating with the DBAOps ops agent (via A2A):**
-- You may have a2a_send_message / a2a_discover_agent tools. The DBAOps ops agent
-  analyzes OS/infra metrics, Aurora PostgreSQL, RDS MySQL, Kafka(MSK) and logs —
-  systems OUTSIDE your SQL Server scope.
+- You may have an ask_dbaops_agent(question) tool. The DBAOps ops agent analyzes
+  OS/infra metrics, Aurora PostgreSQL, RDS MySQL, Kafka(MSK) and logs — systems
+  OUTSIDE your SQL Server scope. The tool returns DBAOps' answer as plain text.
 - When the user's question involves those systems, or asks to cross-check with the
-  ops agent, send it a clear question in Korean via a2a_send_message and integrate
-  the answer into your report (cite it as coming from the DBAOps agent).
+  ops agent, call ask_dbaops_agent with a clear Korean question and quote its
+  returned text in your report (cite it as coming from the DBAOps agent).
 - Never forward SQL Server questions to it — that is your own job.
-- IMPORTANT — reading a2a_send_message results: the DBAOps answer text is inside
-  response.task.artifacts[].parts[].text (a nested JSON structure). Always dig into
-  that path and quote the actual answer text verbatim. Never reply with an empty
-  "here is what DBAOps said:" — extract and include the real text from the artifacts.
 
 **Response format:**
 
@@ -119,20 +115,53 @@ def build_mcp_client() -> MCPClient:
     ))
 
 
+def _flatten_a2a_text(result: dict) -> str:
+    """strands a2a_send_message 결과(중첩 dict)에서 실제 답변 텍스트만 추출."""
+    resp = result.get("response") or {}
+    # (a) Task 형태: response.task.artifacts[].parts[].text
+    task = resp.get("task") or {}
+    texts: list[str] = []
+    for art in (task.get("artifacts") or []):
+        for part in (art.get("parts") or []):
+            t = part.get("text") or (part.get("root") or {}).get("text")
+            if t:
+                texts.append(t)
+    # (b) Message 형태: response.parts[].text
+    if not texts:
+        for part in (resp.get("parts") or []):
+            t = part.get("text") or (part.get("root") or {}).get("text")
+            if t:
+                texts.append(t)
+    return "\n".join(texts).strip() or "(DBAOps 응답에서 텍스트를 찾지 못함)"
+
+
 def build_perf_agent(mcp_client: MCPClient, with_a2a: bool = ENABLE_A2A) -> Agent:
     """Query Performance 에이전트 생성. mcp_client는 열린 상태(context 진입)여야 함."""
     tools = list(mcp_client.list_tools_sync())
 
     if with_a2a:
         try:
+            import asyncio
+            from strands import tool
             from strands_tools.a2a_client import A2AClientToolProvider
             provider = A2AClientToolProvider(
                 known_agent_urls=[OPS_A2A_URL],
                 timeout=int(os.environ.get('A2A_CLIENT_TIMEOUT', '600')),
             )
-            tools += provider.tools
+
+            @tool
+            def ask_dbaops_agent(question: str) -> str:
+                """Ask the DBAOps RCA agent (OS/infra metrics, Aurora PostgreSQL, RDS MySQL,
+                Kafka/MSK, logs) a question over A2A and return its answer as plain text.
+                Use for anything OUTSIDE SQL Server query performance. Korean question works best."""
+                result = asyncio.run(provider._send_message(question, OPS_A2A_URL))
+                if result.get("status") != "success":
+                    return f"[DBAOps A2A error] {result.get('error', result)}"
+                return _flatten_a2a_text(result)
+
+            tools.append(ask_dbaops_agent)
         except Exception as e:
-            print(f"[warn] A2A client tools unavailable: {e}", file=sys.stderr)
+            print(f"[warn] A2A client tool unavailable: {e}", file=sys.stderr)
 
     model = BedrockModel(**model_kwargs())
     return Agent(
