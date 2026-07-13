@@ -52,6 +52,9 @@ DB_NAME=master
 #DB_TARGETS=[{"name":"mssql-main","engine":"mssql","secret_id":"dbops-sqlserver-secret","database":"master"},{"name":"pg-test","engine":"postgres","secret_id":"dbperf-pg-test-secret","database":"appdb","sslmode":"require"}]
 # Slack 알림 기본 채널 (bot token 은 위 SLACK_BOT_TOKEN 재사용)
 #SLACK_CHANNEL=#dbops-alerts
+# Perf 전용 Slack 봇(@perfagent 앱) — dbaops 봇과 별도 앱/토큰
+#PERF_SLACK_BOT_TOKEN=xoxb-...
+#PERF_SLACK_APP_TOKEN=xapp-...
 PERFENV
 fi
 
@@ -65,7 +68,7 @@ sed -e "s|__DBAOPS__|$DBAOPS_DIR|g" \
     "$REPO_ROOT/deploy/systemd/dbaops-a2a.service" | \
   sudo tee "$UNIT_DIR/dbaops-a2a.service" >/dev/null
 # Perf 유닛
-for unit in dbperf-a2a dbperf-streamlit; do
+for unit in dbperf-a2a dbperf-streamlit dbperf-slack-bot; do
   sed -e "s|__PERF__|$PERF_DIR|g" \
       -e "s|__VENV__|$VENV|g" \
       -e "s|__USER__|$RUN_USER|g" \
@@ -74,6 +77,13 @@ for unit in dbperf-a2a dbperf-streamlit; do
 done
 sudo systemctl daemon-reload
 sudo systemctl enable --now dbaops-a2a dbperf-a2a dbperf-streamlit
+# perf slack 토큰이 env에 있으면 perf 봇도 기동
+if sudo grep -qE '^PERF_SLACK_BOT_TOKEN=xoxb-' "$ENV_FILE" 2>/dev/null; then
+  sudo systemctl enable --now dbperf-slack-bot
+  echo "    dbperf-slack-bot 포함 기동"
+else
+  echo "    dbperf-slack-bot 미기동 — $ENV_FILE 에 PERF_SLACK_BOT_TOKEN/PERF_SLACK_APP_TOKEN 채운 뒤: sudo systemctl enable --now dbperf-slack-bot"
+fi
 
 echo ""
 echo "완료. 확인:"

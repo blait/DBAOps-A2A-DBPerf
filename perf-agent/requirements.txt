@@ -11,3 +11,4 @@ pymysql
 boto3
 streamlit
 httpx
+slack-bolt

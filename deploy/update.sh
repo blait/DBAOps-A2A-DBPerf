@@ -26,11 +26,12 @@ sed -e "s|__DBAOPS__|$DBAOPS_DIR|g" -e "s|__VENV__|$VENV|g" \
     "$REPO_ROOT/deploy/systemd/dbaops-a2a.service" | \
   sudo tee /etc/systemd/system/dbaops-a2a.service >/dev/null
 # Perf 유닛
-for unit in dbperf-a2a dbperf-streamlit; do
+for unit in dbperf-a2a dbperf-streamlit dbperf-slack-bot; do
   sed -e "s|__PERF__|$PERF_DIR|g" -e "s|__VENV__|$VENV|g" -e "s|__USER__|$RUN_USER|g" \
       "$REPO_ROOT/deploy/systemd/$unit.service" | \
     sudo tee /etc/systemd/system/$unit.service >/dev/null
 done
 sudo systemctl daemon-reload
 sudo systemctl restart dbaops-a2a dbperf-a2a dbperf-streamlit
+systemctl is-enabled dbperf-slack-bot >/dev/null 2>&1 && sudo systemctl restart dbperf-slack-bot || true
 echo "완료. curl -s http://localhost:9102/.well-known/agent-card.json"

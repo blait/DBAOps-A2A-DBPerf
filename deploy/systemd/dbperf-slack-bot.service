@@ -1,0 +1,19 @@
+# Perf 에이전트 전용 Slack 봇 (Socket Mode) — @perfagent 앱.
+# PERF_SLACK_BOT_TOKEN / PERF_SLACK_APP_TOKEN 이 /etc/dbaops/dbaops.env 에 있어야 기동.
+[Unit]
+Description=DBPerf Slack Bot
+After=network-online.target dbperf-a2a.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=__USER__
+WorkingDirectory=__PERF__
+EnvironmentFile=/etc/dbaops/dbaops.env
+Environment=PERF_A2A_URL=http://127.0.0.1:9100
+ExecStart=__VENV__/bin/python slack_bot.py
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
