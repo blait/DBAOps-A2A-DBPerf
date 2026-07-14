@@ -55,6 +55,10 @@ def _all_tools() -> list:
     global _TOOLS_CACHE
     if _TOOLS_CACHE is None:
         _TOOLS_CACHE = build_mcp_tools(max_response_chars=12000)
+        # 동료 Perf 에이전트(A2A) 위임 도구 — HTTP(:8080)/A2A(:9102) 모든 경로에 포함.
+        from . import perf_peer
+        if perf_peer.ENABLED:
+            _TOOLS_CACHE.append(perf_peer.PERF_TOOL)
         logger.info("single_graph: %d tools loaded from Gateway", len(_TOOLS_CACHE))
     return _TOOLS_CACHE
 
@@ -141,7 +145,13 @@ MySQL:
 - dotted path 예: `top_sql[*].aas`, `series[*].value`, `metricDataResults[0].datapoints[*].value`.
 - source_tool_call_id 는 실제 호출 id 중에서 — 맞는 게 없으면 차트는 생략. PI 는 line 이 아니라 bar.
 </charts>
-"""
+""" + _peer_prompt_appendix()
+
+
+def _peer_prompt_appendix() -> str:
+    """동료 Perf 에이전트 위임 규칙 — perf_peer 활성 시에만 붙는다."""
+    from . import perf_peer
+    return perf_peer.PROMPT_APPENDIX if perf_peer.ENABLED else ""
 
 
 # ─────────────────────── 그래프 빌드/캐시 ───────────────────────
