@@ -32,8 +32,19 @@ a2a-sdk로 직접 감싼 서버로, 원본 `dbaops_agent` 패키지는 수정하
 | 디렉토리 | 내용 |
 |---|---|
 | `dbaops/` | [blait/DBAOps-Agent](https://github.com/blait/DBAOps-Agent) `feat/ec2-allinone-slack` 스냅샷. **vanilla(venv+systemd, docker 불필요)** 배포 경로 포함. 원본 레포는 무수정 |
-| `perf-agent/` | SQL Server 쿼리 성능 에이전트 (**LangGraph** analyze→validate→report 파이프라인 + stdio MCP 도구 13개) + A2A 서버 + Streamlit |
+| `perf-agent/` | **멀티엔진 쿼리 성능 에이전트** — SQL Server/PostgreSQL/MySQL 을 하나의 도구 세트(13개)로 진단. **LangGraph** analyze→validate→report 파이프라인 + A2A 서버 + Streamlit + Slack 봇 |
 | `deploy/` | 통합 `install.sh` / `update.sh` + systemd 유닛(dbaops-a2a + perf 2개) |
+
+## 📖 문서 읽는 순서
+
+1. **이 README** — 전체 그림 (5분)
+2. [`perf-agent/MANUAL.md`](perf-agent/MANUAL.md) — 운영: 기동/연동 설정/트러블슈팅
+3. [`perf-agent/AGENT_GUIDE.md`](perf-agent/AGENT_GUIDE.md) — 사용: 도구 13개 설명 + 질문 예시
+
+상황별 참고: Slack 앱 생성 → [`SLACK_SETUP.md`](dbaops/deploy/ec2-allinone/SLACK_SETUP.md) ·
+DBAOps UI 연결설정 → [`ONBOARDING.md`](dbaops/docs/ONBOARDING.md) ·
+DBAOps 내부 구조 → [`SERVICE_GUIDE.md`](dbaops/docs/SERVICE_GUIDE.md).
+그 외 dbaops/ 안 문서는 원본 스냅샷 부속 문서로 이 구성에선 불필요.
 
 ## Quick start (docker 없음)
 
@@ -51,7 +62,7 @@ bash deploy/install.sh          # OS 패키지 + venv + systemd 유닛(dbaops 4 
 접속 (데모 배포 기준 — CloudFront):
 - **DBAOps UI** → https://dpgp5ivsrtdp4.cloudfront.net (도메인 파이프라인 탭 + MCP 연결설정)
 - **Perf UI** → https://dcc3of9o678kv.cloudfront.net (perf 채팅 / ops 채팅 / 연동 관리)
-- Slack → 채널에서 `@DBAOps 질문` (Socket Mode)
+- Slack → `@dbaagent 질문`(DBAOps) / `@perfagent 질문`(Perf) — 에이전트별 앱 (Socket Mode)
 - (직접 배포 시: http://<EC2-IP>:8501 / :8502, SG 인바운드 필요)
 
 상세: [perf-agent/MANUAL.md](perf-agent/MANUAL.md) · [perf-agent/AGENT_GUIDE.md](perf-agent/AGENT_GUIDE.md) ·
@@ -68,6 +79,7 @@ bash deploy/install.sh          # OS 패키지 + venv + systemd 유닛(dbaops 4 
 | dbperf-a2a | 9100 | ✗ |
 | dbaops-a2a | 9102 | ✗ |
 | dbperf-streamlit | 8502 | ✓ |
+| dbperf-slack-bot / dbaops-slack-bot | — (wss egress) | ✗ |
 
 SG 인바운드는 8501/8502만(접속할 IP 한정). A2A·MCP·agent 포트는 전부 127.0.0.1 내부 통신.
 
@@ -80,12 +92,16 @@ SG 인바운드는 8501/8502만(접속할 IP 한정). A2A·MCP·agent 포트는 
   어느 UI에서 질문하든 에이전트가 스스로 상대에게 `a2a_send_message`로 물어 답을 종합.
   무한 위임은 역할 경계 프롬프트로 방지.
 
-## Slack — Bot Token 방식
+## Slack — 에이전트별 봇 2개 (Bot Token 방식)
 
-webhook이 아니라 **bot token(xoxb-…)**. DBAOps slack-bot(Socket Mode 대화형)과
-perf 알림 도구(`send_slack_notification`, chat.postMessage)가 같은 토큰을 공유한다.
-`/etc/dbaops/dbaops.env`에 `SLACK_BOT_TOKEN` / `SLACK_APP_TOKEN` / `SLACK_CHANNEL`.
-토큰 발급: [dbaops/deploy/ec2-allinone/SLACK_SETUP.md](dbaops/deploy/ec2-allinone/SLACK_SETUP.md)
+| 멘션 | 봇 프로세스 | 백엔드 | 토큰 env |
+|---|---|---|---|
+| `@dbaagent` | dbaops-slack-bot | DBAOps :8080 | `SLACK_BOT_TOKEN`/`SLACK_APP_TOKEN` |
+| `@perfagent` | dbperf-slack-bot | Perf A2A :9100 | `PERF_SLACK_BOT_TOKEN`/`PERF_SLACK_APP_TOKEN` |
+
+토큰을 `/etc/dbaops/dbaops.env`에 넣고 `sudo systemctl enable --now dbaops-slack-bot dbperf-slack-bot`.
+perf의 알림 도구(`send_slack_notification`)는 `SLACK_CHANNEL`로 발송.
+앱 생성/토큰 발급: [dbaops/deploy/ec2-allinone/SLACK_SETUP.md](dbaops/deploy/ec2-allinone/SLACK_SETUP.md)
 
 ## 요구 사항
 
@@ -97,7 +113,7 @@ perf 알림 도구(`send_slack_notification`, chat.postMessage)가 같은 토큰
 ## 운영
 
 ```bash
-systemctl status dbaops-agent dbaops-a2a dbperf-a2a dbperf-streamlit --no-pager
+systemctl status dbaops-agent dbaops-a2a dbperf-a2a dbperf-streamlit dbperf-slack-bot --no-pager
 journalctl -u dbperf-a2a -f
 cd ~/DBAOps-A2A-DBPerf && git pull && bash deploy/update.sh   # 코드 업데이트
 ```
