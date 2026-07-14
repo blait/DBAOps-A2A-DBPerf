@@ -58,15 +58,8 @@ DB_NAME=master
 PERFENV
 fi
 
-echo "    systemd 유닛 설치 (dbaops-a2a / dbperf-a2a / dbperf-streamlit)"
-# DBAOps native A2A (dbaops 리포 경로 + data + venv 치환)
-DATA_DIR="$INSTALL_DIR/data"
-sed -e "s|__DBAOPS__|$DBAOPS_DIR|g" \
-    -e "s|__VENV__|$VENV|g" \
-    -e "s|__DATA__|$DATA_DIR|g" \
-    -e "s|__USER__|$RUN_USER|g" \
-    "$REPO_ROOT/deploy/systemd/dbaops-a2a.service" | \
-  sudo tee "$UNIT_DIR/dbaops-a2a.service" >/dev/null
+echo "    systemd 유닛 설치 (dbperf-a2a / dbperf-streamlit)"
+# DBAOps A2A(:9102)는 dbaops-agent 프로세스가 겸용 — 별도 유닛 없음
 # Perf 유닛
 for unit in dbperf-a2a dbperf-streamlit dbperf-slack-bot; do
   sed -e "s|__PERF__|$PERF_DIR|g" \
@@ -76,7 +69,7 @@ for unit in dbperf-a2a dbperf-streamlit dbperf-slack-bot; do
     sudo tee "$UNIT_DIR/$unit.service" >/dev/null
 done
 sudo systemctl daemon-reload
-sudo systemctl enable --now dbaops-a2a dbperf-a2a dbperf-streamlit
+sudo systemctl enable --now dbperf-a2a dbperf-streamlit
 # perf slack 토큰이 env에 있으면 perf 봇도 기동
 if sudo grep -qE '^PERF_SLACK_BOT_TOKEN=xoxb-' "$ENV_FILE" 2>/dev/null; then
   sudo systemctl enable --now dbperf-slack-bot
@@ -87,7 +80,7 @@ fi
 
 echo ""
 echo "완료. 확인:"
-echo "  systemctl status dbaops-agent dbaops-a2a dbperf-a2a dbperf-streamlit --no-pager"
+echo "  systemctl status dbaops-agent dbperf-a2a dbperf-streamlit --no-pager"
 echo "  curl -s http://localhost:9100/.well-known/agent-card.json | python3 -c 'import sys,json;print(json.load(sys.stdin)[\"name\"])'"
 echo "  curl -s http://localhost:9102/.well-known/agent-card.json | python3 -c 'import sys,json;print(json.load(sys.stdin)[\"name\"])'"
 echo "  브라우저: http://<EC2-IP>:8501 (DBAOps)   http://<EC2-IP>:8502 (Perf)"

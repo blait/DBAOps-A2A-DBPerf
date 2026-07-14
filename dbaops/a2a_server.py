@@ -1,17 +1,18 @@
 """
-a2a_server.py - DBAOps RCA 에이전트를 A2A 프로토콜로 직접 노출 (native, :9102).
+a2a_server.py - DBAOps RCA 에이전트의 A2A 프로토콜 노출 (:9102).
 
 DBAOps 그래프(invoke_single)를 a2a-sdk 서버로 감싸 perf 에이전트(:9100)가
 표준 A2A로 질문할 수 있게 한다.
 
-**상호(A2A 양방향)**: dbaops → perf 방향의 `ask_perf_agent` 도구는
-dbaops_agent.perf_peer 에 있고 single_graph 가 직접 포함한다 — 따라서
-HTTP(:8080, UI/Slack) 경로와 이 A2A 경로 모두 동일하게 위임이 동작한다.
+**단일 프로세스**: 별도 서비스가 아니라 dbaops-agent 프로세스(runtime_entry)가
+serve_in_thread()로 :8080(HTTP)과 :9102(A2A)를 함께 서빙한다 — 그래프/도구
+캐시가 메모리에 하나만 뜨고, ask_perf_agent 등 도구 구성이 모든 경로에서 동일.
 
-의존: mcp-router(:9000, GATEWAY_ENDPOINT) + Bedrock. dbaops-agent 서비스와 동일 요구.
+**상호(A2A 양방향)**: dbaops → perf 방향의 `ask_perf_agent` 도구는
+dbaops_agent.perf_peer 에 있고 single_graph 가 직접 포함한다.
 
 Agent card: http://<host>:9102/.well-known/agent-card.json
-Run:  python -m a2a_server   (또는 python a2a_server.py)
+단독 실행(디버그용):  python a2a_server.py
 """
 from __future__ import annotations
 
@@ -122,6 +123,21 @@ def build_app() -> A2AStarletteApplication:
         task_store=InMemoryTaskStore(),
     )
     return A2AStarletteApplication(agent_card=build_agent_card(), http_handler=handler)
+
+
+def serve_in_thread() -> "threading.Thread":
+    """A2A 서버를 데몬 스레드로 기동 — runtime_entry(:8080)와 같은 프로세스에서 서빙."""
+    import threading
+
+    def _run():
+        app = build_app().build()
+        uvicorn.run(app, host=HOST, port=PORT,
+                    log_level=os.environ.get("LOG_LEVEL", "info").lower())
+
+    t = threading.Thread(target=_run, name="a2a-server", daemon=True)
+    t.start()
+    print(f"DBAOps A2A server thread on {HOST}:{PORT} (card url: {PUBLIC_URL})")
+    return t
 
 
 def main():
