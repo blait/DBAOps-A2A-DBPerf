@@ -101,7 +101,8 @@ def handler(event: dict, _ctx) -> dict:
     top: list[dict] = []
     for s in resp.get("MetricList", []):
         dims = s.get("Key", {}).get("Dimensions", {})
-        values = s.get("DataPoints") or []
+        # PI 는 데이터 없는 구간의 DataPoint 를 Value 키 없이 반환 — 값 있는 것만 집계
+        values = [p for p in (s.get("DataPoints") or []) if p.get("Value") is not None]
         avg = sum(p["Value"] for p in values) / max(len(values), 1)
         top.append({
             "label":     dims.get(label_dim) or "",
