@@ -145,7 +145,17 @@ Never delegate SQL Server/PostgreSQL/MySQL query performance questions (your own
 **Evidence rules (validation단계에서 검사됨):**
 - Every concrete number/claim must come from a tool result you actually called
 - If a tool returned an error or empty data, say so — never invent findings
-- Answer in the user's language (Korean in → Korean out)"""
+- Answer in the user's language (Korean in → Korean out)
+
+**Charts (선택):** 수치 비교/분포가 핵심일 때만, 답변 안에 아래 형식의 코드블록을 넣어라
+(UI/Slack이 이 스펙과 네 도구 결과 데이터로 차트를 그린다):
+```json-chart
+{ "chart_type": "bar|line|scatter|histogram|table", "title": "<짧은 한글 제목>",
+  "source_tool_call_id": "<네가 실제 호출한 도구 call id — 지어내지 말 것>",
+  "x_field": "<dotted path>", "y_field": "<dotted path>" }
+```
+예) get_top_queries 결과 → x="queries[*].query_text", y="queries[*].total_cpu_ms".
+맞는 call id가 없으면 차트는 생략. 표 데이터가 이미 텍스트로 충분하면 차트 불필요."""
 
 VALIDATOR_PROMPT = """You are a strict reviewer of a database performance analysis (SQL Server/PostgreSQL).
 Given the user request and the analyst's final answer (with the tools that were called),
@@ -273,3 +283,69 @@ async def run_perf(graph, user_input: str, thread_id: str = "default") -> str:
                 "recursion_limit": RECURSION_LIMIT + 20},
     )
     return out.get("final") or out.get("analysis") or "(응답 없음)"
+
+
+# ───────────────────── 스트리밍 실행 (DBAOps iter_single과 같은 이벤트 모양) ─────────────────────
+
+def _normalize_message(m) -> dict:
+    """LangChain BaseMessage → UI/Slack 렌더러가 쓰는 dict (dbaops normalize_message 호환)."""
+    role = getattr(m, "type", None) or "ai"
+    content = getattr(m, "content", None)
+    if isinstance(content, list):
+        content = "".join(p.get("text", "") for p in content if isinstance(p, dict))
+    tcs = [{"id": tc.get("id"), "name": tc.get("name"), "args": tc.get("args")}
+           for tc in (getattr(m, "tool_calls", None) or [])]
+    out = {"role": role, "name": getattr(m, "name", None),
+           "text": (content or "")[:13000], "tool_calls": tcs}
+    tcid = getattr(m, "tool_call_id", None)
+    if tcid:
+        out["tool_call_id"] = tcid
+    return out
+
+
+async def iter_perf(graph, user_input: str, thread_id: str = "default"):
+    """그래프 실행을 스트리밍 — dbaops iter_single과 같은 이벤트 dict를 yield.
+
+    이벤트: start / stage(analyze·validate·revise·report) / message /
+            validation / report / done / error
+    Slack·Streamlit이 dbaops와 동일한 렌더러로 진행상황·차트를 그릴 수 있다.
+    """
+    yield {"type": "start", "entry": "perf_agent",
+           "reasoning": "쿼리 성능 분석가가 도구를 직접 골라 호출합니다."}
+
+    config = {"configurable": {"thread_id": thread_id},
+              "recursion_limit": RECURSION_LIMIT + 20}
+    state = {"messages": [], "user_input": user_input, "analysis": "",
+             "verdict": "", "issues": "", "revised": False, "final": ""}
+
+    seen: set[str] = set()
+    final_out: dict = {}
+    try:
+        async for chunk in graph.astream(state, config=config, stream_mode=["values", "updates"]):
+            mode, payload = chunk if isinstance(chunk, tuple) else ("values", chunk)
+            if mode == "updates":
+                for node, upd in (payload or {}).items():
+                    yield {"type": "stage", "stage": node, "status": "completed"}
+                    if node == "validate" and isinstance(upd, dict) and upd.get("verdict"):
+                        yield {"type": "validation",
+                               "passed": upd["verdict"] != "FAIL",
+                               "issues": ([{"kind": upd.get("issues", "")}]
+                                          if upd.get("verdict") == "FAIL" else [])}
+                continue
+            # values 모드 — 새 메시지만 흘림
+            if isinstance(payload, dict):
+                final_out = payload
+                for m in (payload.get("messages") or []):
+                    key = str(getattr(m, "id", None) or id(m))
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    yield {"type": "message", "message": _normalize_message(m)}
+    except Exception as e:  # noqa: BLE001
+        logger.exception("perf stream failed")
+        yield {"type": "error", "error": str(e)}
+        return
+
+    final = final_out.get("final") or final_out.get("analysis") or "(응답 없음)"
+    yield {"type": "report", "markdown": final, "charts": []}
+    yield {"type": "done", "final_active_agent": "perf_agent"}

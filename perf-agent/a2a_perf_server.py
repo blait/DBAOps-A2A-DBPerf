@@ -1,10 +1,13 @@
 """
-a2a_perf_server.py - LangGraph 기반 Query Performance 에이전트를 A2A로 노출 (:9100).
+a2a_perf_server.py - LangGraph 기반 Query Performance 에이전트 서버 (:9100).
 
-Strands A2AServer 대신 a2a-sdk 직접 구현 (dbaops/a2a_server.py와 동일 패턴).
+한 프로세스가 두 인터페이스를 서빙 (dbaops-agent와 동일 구조):
+- **A2A** (a2a-sdk 표준) — peer 에이전트(dbaops)·외부 시스템용, Task+artifact 응답
+- **POST /invocations** (NDJSON 스트리밍) — UI/Slack용 진행 이벤트 스트림
+  (start/stage/message/validation/report/done — dbaops iter_single과 같은 모양)
+
 - MCP stdio 세션(mcp_query_tools.py)은 서버 기동 시 열어 프로세스 수명 동안 상주
-- A2A context_id → LangGraph thread_id 매핑으로 대화 연속성 유지
-- Task + artifact 형태 응답 (peer/strands/사내 클라이언트 모두 파싱 가능)
+- A2A context_id / invocations session_id → LangGraph thread_id 매핑으로 대화 연속성 유지
 
 Agent card: http://<host>:9100/.well-known/agent-card.json
 Run:  python a2a_perf_server.py
@@ -13,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import logging
 import os
 import sys
@@ -25,6 +29,9 @@ from a2a.server.request_handlers import DefaultRequestHandler
 from a2a.server.tasks import InMemoryTaskStore, TaskUpdater
 from a2a.types import AgentCapabilities, AgentCard, AgentSkill, Part, TextPart
 from mcp import ClientSession, StdioServerParameters, stdio_client
+from starlette.requests import Request
+from starlette.responses import JSONResponse, StreamingResponse
+from starlette.routing import Route
 
 import perf_graph
 
@@ -124,13 +131,57 @@ async def _lifespan(app):  # noqa: ANN001
         await keeper
 
 
+# ───────────── POST /invocations — NDJSON 스트리밍 (UI/Slack용) ─────────────
+
+async def _invocations(request: Request):
+    """dbaops runtime_entry와 같은 규약: {"request":{...}} → NDJSON 이벤트 스트림.
+
+    stream 미요청 시엔 최종 결과 JSON 하나 (dbaops handler와 동일한 동기 규약).
+    """
+    try:
+        event = await request.json()
+    except Exception:  # noqa: BLE001
+        event = {}
+    req = event.get("request") or {}
+    user_text = req.get("free_text") or ""
+    thread = f"inv:{req.get('session_id') or 'default'}"
+    stream = (req.get("stream") is True
+              or "ndjson" in (request.headers.get("accept") or "").lower())
+
+    try:
+        await asyncio.wait_for(_READY.wait(), timeout=30)
+    except asyncio.TimeoutError:
+        return JSONResponse({"error": "perf graph not ready"}, status_code=503)
+
+    if not stream:
+        answer = await perf_graph.run_perf(_GRAPH, user_text, thread_id=thread)
+        return JSONResponse({"result": answer, "request": req})
+
+    async def gen():
+        try:
+            async for ev in perf_graph.iter_perf(_GRAPH, user_text, thread_id=thread):
+                yield (json.dumps(ev, ensure_ascii=False, default=str) + "\n").encode()
+        except Exception as e:  # noqa: BLE001
+            logger.exception("invocations stream failed")
+            yield (json.dumps({"type": "error", "error": str(e)}) + "\n").encode()
+
+    return StreamingResponse(gen(), media_type="application/x-ndjson")
+
+
+async def _healthz(_request: Request):
+    return JSONResponse({"status": "ok", "ready": _READY.is_set()})
+
+
 def main():
     handler = DefaultRequestHandler(agent_executor=PerfExecutor(),
                                     task_store=InMemoryTaskStore())
     app = A2AStarletteApplication(agent_card=build_agent_card(),
                                   http_handler=handler).build(lifespan=_lifespan)
+    # 같은 프로세스·같은 포트에 UI/Slack용 스트리밍 라우트 추가
+    app.router.routes.append(Route("/invocations", _invocations, methods=["POST"]))
+    app.router.routes.append(Route("/healthz", _healthz, methods=["GET"]))
 
-    print(f"Query Performance A2A server (LangGraph) on {HOST}:{PORT} (card url: {PUBLIC_URL})")
+    print(f"Query Performance server (A2A + /invocations) on {HOST}:{PORT} (card url: {PUBLIC_URL})")
     uvicorn.run(app, host=HOST, port=PORT,
                 log_level=os.environ.get("LOG_LEVEL", "info").lower())
 

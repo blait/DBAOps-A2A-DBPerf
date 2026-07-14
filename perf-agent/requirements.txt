@@ -12,3 +12,4 @@ boto3
 streamlit
 httpx
 slack-bolt
+matplotlib>=3.8.0

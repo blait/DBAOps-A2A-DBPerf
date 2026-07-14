@@ -1,12 +1,14 @@
 """
 slack_bot.py - Perf 에이전트 전용 Slack 봇 (Socket Mode).
 
-DBAOps의 slack_bot(dbaops/slack_bot/bot.py, @dbaagent)과 별개의 앱/프로세스로,
-perf A2A 서버(:9100)에 질문을 전달한다. 채널에서 @perfagent(앱 display_name)로 멘션.
+DBAOps의 slack_bot(@dbaagent)과 별개의 앱/프로세스로, perf 서버(:9100)의
+**POST /invocations NDJSON 스트림**을 소비한다 — dbaops 봇과 동일한
+SlackThreadRenderer 를 재사용해 진행상황 갱신·mrkdwn 변환·차트 PNG 첨부까지 동일 UX.
 
-  Slack ──wss(Socket Mode)── [이 봇] ──A2A──▶ dbperf-a2a :9100 (LangGraph perf)
+  Slack ──wss(Socket Mode)── [이 봇] ──NDJSON──▶ dbperf-a2a :9100 (/invocations)
+                                              (A2A 는 peer 에이전트용, 같은 프로세스)
 
-- 같은 스레드 = 같은 세션 (thread_ts → A2A context_id → LangGraph thread_id)
+- 같은 스레드 = 같은 세션 (thread_ts → session_id → LangGraph thread_id)
 - 스레드 안 후속 질문은 멘션 없이도 응답 (한번 멘션으로 시작한 스레드만)
 - 봇 display_name은 Slack 앱 설정이 결정 — 코드는 이름과 무관 (user ID 멘션 처리)
 
@@ -17,26 +19,29 @@ env (dbaops와 분리):
 """
 from __future__ import annotations
 
-import asyncio
+import json
 import logging
 import os
 import re
+import sys
 import threading
-import uuid
 
 import httpx
-from a2a.client import A2ACardResolver, ClientConfig, ClientFactory
-from a2a.types import Message, Part, Role, TextPart
 from slack_bolt import App
 from slack_bolt.adapter.socket_mode import SocketModeHandler
 
-from slack_render import chunk_for_slack, md_to_mrkdwn
+# dbaops slack_bot 의 렌더러/차트 재사용 (mrkdwn 변환·표·차트 PNG 전부 검증된 코드)
+_DBAOPS_SLACK = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                             "..", "dbaops", "slack_bot")
+sys.path.insert(0, os.path.abspath(_DBAOPS_SLACK))
+from render import SlackThreadRenderer  # noqa: E402
 
 logging.basicConfig(level=os.environ.get("LOG_LEVEL", "INFO"))
 logger = logging.getLogger("perf-slack")
 
 PERF_A2A_URL = os.environ.get("PERF_A2A_URL", "http://127.0.0.1:9100")
-A2A_TIMEOUT = int(os.environ.get("A2A_CLIENT_TIMEOUT", "600"))
+STREAM_TIMEOUT = int(os.environ.get("A2A_CLIENT_TIMEOUT", "600"))
+STREAMLIT_URL = os.environ.get("PERF_STREAMLIT_URL", "")
 
 app = App(token=os.environ["PERF_SLACK_BOT_TOKEN"])
 
@@ -48,56 +53,43 @@ def _strip_mention(text: str) -> str:
     return re.sub(r"<@[A-Z0-9]+>", "", text or "").strip()
 
 
-async def _ask_perf(question: str, context_id: str) -> str:
-    async with httpx.AsyncClient(timeout=A2A_TIMEOUT) as hc:
-        card = await A2ACardResolver(httpx_client=hc, base_url=PERF_A2A_URL).get_agent_card()
-        client = ClientFactory(ClientConfig(httpx_client=hc, streaming=False)).create(card)
-        msg = Message(role=Role.user, parts=[Part(TextPart(text=question))],
-                      message_id=uuid.uuid4().hex, context_id=context_id)
-
-        def texts(parts):
-            return [getattr(getattr(p, "root", p), "text", None)
-                    for p in (parts or []) if getattr(getattr(p, "root", p), "text", None)]
-
-        chunks: list[str] = []
-        async for ev in client.send_message(msg):
-            if isinstance(ev, tuple):
-                task = ev[0]
-                for art in (getattr(task, "artifacts", None) or []):
-                    chunks += texts(getattr(art, "parts", None))
-                status = getattr(task, "status", None)
-                if status and getattr(status, "message", None):
-                    chunks += texts(getattr(status.message, "parts", None))
-            else:
-                chunks += texts(getattr(ev, "parts", None))
-        return "\n".join(chunks).strip() or "(응답 없음)"
+def _iter_stream(question: str, session_id: str):
+    """perf 서버 /invocations NDJSON 스트림 → 이벤트 dict 순회."""
+    payload = {"request": {"free_text": question, "session_id": session_id, "stream": True}}
+    with httpx.stream("POST", f"{PERF_A2A_URL}/invocations", json=payload,
+                      timeout=STREAM_TIMEOUT) as resp:
+        resp.raise_for_status()
+        for line in resp.iter_lines():
+            if not line:
+                continue
+            try:
+                yield json.loads(line)
+            except json.JSONDecodeError:
+                continue
 
 
-def _post_chunked(client, channel: str, thread_ts: str, text: str) -> None:
-    """리포트 게시 — DBAOps 봇과 동일한 mrkdwn 변환 + 분할 (slack_render).
-
-    표준 마크다운(## 헤더/**굵게**/표)을 Slack mrkdwn 으로 변환해 보낸다.
-    표는 monospace 코드블록 정렬(넓으면 레코드 리스트 폴백)까지 동일.
-    """
-    body = md_to_mrkdwn(text)
-    for chunk in chunk_for_slack(body) or ["_(빈 응답)_"]:
-        client.chat_postMessage(channel=channel, thread_ts=thread_ts, text=chunk)
-
-
-def _run_chat(client, channel: str, thread_ts: str, question: str) -> None:
-    context_id = "slk-" + thread_ts.replace(".", "")
-    status = client.chat_postMessage(channel=channel, thread_ts=thread_ts,
-                                     text="⏳ 쿼리 성능 분석 중… (도구 호출 포함 수 분 걸릴 수 있어요)")
+def _run_chat(client, channel: str, thread_ts: str, status_ts: str, question: str) -> None:
+    session_id = "slk-" + thread_ts.replace(".", "")
+    renderer = SlackThreadRenderer(client, channel, thread_ts, status_ts,
+                                   streamlit_url=STREAMLIT_URL or None)
     try:
-        answer = asyncio.run(_ask_perf(question, context_id))
-        _post_chunked(client, channel, thread_ts, answer)
-        client.chat_update(channel=channel, ts=status["ts"], text="✅ 분석 완료")
+        for ev in _iter_stream(question, session_id):
+            renderer.handle(ev)
     except Exception as e:  # noqa: BLE001
         logger.exception("perf chat failed")
         try:
-            client.chat_update(channel=channel, ts=status["ts"], text=f"❌ 실행 오류: {e!r}")
+            client.chat_update(channel=channel, ts=status_ts, text=f"❌ 실행 오류: {e!r}")
         except Exception:  # noqa: BLE001
             pass
+
+
+def _start_chat(client, channel: str, thread_ts: str, question: str) -> None:
+    _ACTIVE_THREADS.add(thread_ts)
+    status = client.chat_postMessage(channel=channel, thread_ts=thread_ts,
+                                     text="⏳ 쿼리 성능 분석 시작…")
+    threading.Thread(target=_run_chat,
+                     args=(client, channel, thread_ts, status["ts"], question),
+                     daemon=True).start()
 
 
 @app.event("app_mention")
@@ -111,9 +103,7 @@ def on_mention(body, client):
                                 text="질문을 함께 적어주세요.\n예: `mysql-poc 풀스캔 많은 테이블 봐줘` / "
                                      "`SQL Server 블로킹 확인` / `pg-test 상위 쿼리`")
         return
-    _ACTIVE_THREADS.add(thread_ts)
-    threading.Thread(target=_run_chat, args=(client, channel, thread_ts, question),
-                     daemon=True).start()
+    _start_chat(client, channel, thread_ts, question)
 
 
 @app.event("message")
@@ -130,13 +120,11 @@ def on_message(body, client):
         return
     question = text.strip()
     if question:
-        threading.Thread(target=_run_chat,
-                         args=(client, ev["channel"], thread_ts, question),
-                         daemon=True).start()
+        _start_chat(client, ev["channel"], thread_ts, question)
 
 
 def main():
-    logger.info("Perf Slack bot starting (Socket Mode)… → %s", PERF_A2A_URL)
+    logger.info("Perf Slack bot starting (Socket Mode, streaming)… → %s", PERF_A2A_URL)
     SocketModeHandler(app, os.environ["PERF_SLACK_APP_TOKEN"]).start()
 
 

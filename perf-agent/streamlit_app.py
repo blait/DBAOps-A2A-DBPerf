@@ -93,6 +93,52 @@ def a2a_ask(base_url: str, text: str, context_id: str) -> str:
     return asyncio.run(_a2a_ask(base_url, text, context_id))
 
 
+# ───────────────────── perf 스트리밍 (/invocations NDJSON) ─────────────────────
+
+_STAGE_LABEL = {"analyze": "🔎 분석", "validate": "🧪 검증",
+                "revise": "✍️ 보정", "report": "📝 리포트 생성"}
+
+
+def perf_ask_stream(base_url: str, text: str, session_id: str, status_slot) -> str:
+    """perf 서버 /invocations NDJSON 스트림 소비 — 진행상황을 status_slot에 갱신하고
+    최종 report markdown을 반환. (dbaops UI의 이벤트 규약과 동일)"""
+    import json as _json
+    payload = {"request": {"free_text": text, "session_id": session_id, "stream": True}}
+    final_md, tool_calls = "", 0
+    with httpx.stream("POST", f"{base_url.rstrip('/')}/invocations",
+                      json=payload, timeout=900) as resp:
+        resp.raise_for_status()
+        for line in resp.iter_lines():
+            if not line:
+                continue
+            try:
+                ev = _json.loads(line)
+            except _json.JSONDecodeError:
+                continue
+            et = ev.get("type")
+            if et == "stage":
+                label = _STAGE_LABEL.get(ev.get("stage", ""), ev.get("stage", ""))
+                status_slot.caption(f"{label} 완료 (tool calls: {tool_calls})")
+            elif et == "message":
+                m = ev.get("message") or {}
+                tcs = m.get("tool_calls") or []
+                if tcs:
+                    tool_calls += len(tcs)
+                    preamble = (m.get("text") or "").strip()
+                    if preamble:
+                        status_slot.caption(f"💬 {preamble[:200]}")
+                    else:
+                        names = ", ".join(tc.get("name", "?") for tc in tcs)
+                        status_slot.caption(f"🔧 {names} 호출 중… (tool calls: {tool_calls})")
+            elif et == "validation":
+                status_slot.caption("✅ 검증 통과" if ev.get("passed") else "⚠️ 검증 이슈 — 보정 중")
+            elif et == "report":
+                final_md = ev.get("markdown") or ""
+            elif et == "error":
+                raise RuntimeError(ev.get("error", "unknown"))
+    return final_md or "(응답 없음)"
+
+
 # ───────────────────────── 채팅 탭 ─────────────────────────
 
 def render_chat_tab(a: dict) -> None:
@@ -121,11 +167,23 @@ def render_chat_tab(a: dict) -> None:
     with st.chat_message("assistant", avatar="🤖"):
         import time
         t0 = time.time()
-        with st.spinner("분석 중…(도구 호출 포함 수 분 걸릴 수 있음)"):
+        ctx = st.session_state[f"ctx__{a['key']}"]
+        if a["key"] == "perf":
+            # perf — /invocations NDJSON 스트리밍 (진행상황 실시간 표시)
+            status_slot = st.empty()
+            status_slot.caption("⏳ 분석 시작…")
             try:
-                answer = a2a_ask(a["url"], prompt, st.session_state[f"ctx__{a['key']}"])
+                answer = perf_ask_stream(a["url"], prompt, ctx, status_slot)
+                status_slot.empty()
             except Exception as e:
-                answer = f"❌ A2A 호출 실패: {e}\n\n서버 기동 여부를 연동 관리 탭에서 확인하세요."
+                status_slot.empty()
+                answer = f"❌ 호출 실패: {e}\n\n서버 기동 여부를 연동 관리 탭에서 확인하세요."
+        else:
+            with st.spinner("분석 중…(도구 호출 포함 수 분 걸릴 수 있음)"):
+                try:
+                    answer = a2a_ask(a["url"], prompt, ctx)
+                except Exception as e:
+                    answer = f"❌ A2A 호출 실패: {e}\n\n서버 기동 여부를 연동 관리 탭에서 확인하세요."
         elapsed = time.time() - t0
         st.markdown(answer)
         st.caption(f"⏱ {elapsed:.1f}s")
