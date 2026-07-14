@@ -72,7 +72,12 @@ async def _ask_perf(question: str, context_id: str) -> str:
 
 
 def _post_chunked(client, channel: str, thread_ts: str, text: str) -> None:
-    """Slack 메시지 길이 제한(4000자) 대응 — 마크다운 유지한 채 분할."""
+    """Slack 메시지 길이 제한(4000자) 대응 — 마크다운 유지한 채 분할.
+
+    에이전트 리포트는 표준 마크다운(## 헤더, **굵게**)이라 Block Kit의
+    `markdown` 블록으로 보내야 제대로 렌더링된다. 블록 미지원 워크스페이스나
+    렌더 실패(invalid_blocks 등) 시 기존 plain text로 폴백.
+    """
     limit = 3800
     while text:
         cut = text[:limit]
@@ -80,7 +85,14 @@ def _post_chunked(client, channel: str, thread_ts: str, text: str) -> None:
             nl = cut.rfind("\n")
             if nl > limit // 2:
                 cut = cut[:nl]
-        client.chat_postMessage(channel=channel, thread_ts=thread_ts, text=cut)
+        try:
+            client.chat_postMessage(
+                channel=channel, thread_ts=thread_ts,
+                blocks=[{"type": "markdown", "text": cut}],
+                text=cut[:150],  # 알림 미리보기/블록 실패 폴백용
+            )
+        except Exception:  # noqa: BLE001 — invalid_blocks 등
+            client.chat_postMessage(channel=channel, thread_ts=thread_ts, text=cut)
         text = text[len(cut):].lstrip("\n")
 
 
