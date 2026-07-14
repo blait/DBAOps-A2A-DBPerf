@@ -1,21 +1,18 @@
 """
-a2a_server.py - DBAOps RCA 에이전트의 A2A 프로토콜 노출 (:9102).
+a2a_server.py - DBAOps RCA 에이전트 통합 서버 (:8080, 포트 하나).
 
-DBAOps 그래프(invoke_single)를 a2a-sdk 서버로 감싸 perf 에이전트(:9100)가
-표준 A2A로 질문할 수 있게 한다.
+perf 서버(a2a_perf_server.py)와 동일 구조 — Starlette 앱 하나가 한 포트에서:
+- **A2A** (a2a-sdk 표준) — peer 에이전트(perf)·외부 시스템용, Task+artifact 응답
+- **POST /invocations** — UI/Slack용. NDJSON 스트리밍(진행 이벤트) + 동기 JSON 둘 다
+  기존 runtime_entry 규약 그대로 (pipeline/single 모드, /ping·/healthz 포함)
 
-**단일 프로세스**: 별도 서비스가 아니라 dbaops-agent 프로세스(runtime_entry)가
-serve_in_thread()로 :8080(HTTP)과 :9102(A2A)를 함께 서빙한다 — 그래프/도구
-캐시가 메모리에 하나만 뜨고, ask_perf_agent 등 도구 구성이 모든 경로에서 동일.
-
-**상호(A2A 양방향)**: dbaops → perf 방향의 `ask_perf_agent` 도구는
-dbaops_agent.perf_peer 에 있고 single_graph 가 직접 포함한다.
-
-Agent card: http://<host>:9102/.well-known/agent-card.json
-단독 실행(디버그용):  python a2a_server.py
+Agent card: http://<host>:8080/.well-known/agent-card.json
+Run:  python a2a_server.py   (systemd dbaops-agent 유닛의 ExecStart)
 """
 from __future__ import annotations
 
+import json
+import logging
 import os
 
 import uvicorn
@@ -26,11 +23,16 @@ from a2a.server.request_handlers import DefaultRequestHandler
 from a2a.server.tasks import InMemoryTaskStore, TaskUpdater
 from a2a.types import (AgentCapabilities, AgentCard, AgentSkill,
                        Part, TextPart)
+from starlette.requests import Request
+from starlette.responses import JSONResponse, StreamingResponse
+from starlette.routing import Route
 
 from dbaops_agent.single_graph import invoke_single
 
+logger = logging.getLogger(__name__)
+
 HOST = os.environ.get("DBAOPS_A2A_HOST", "0.0.0.0")
-PORT = int(os.environ.get("DBAOPS_A2A_PORT", "9102"))
+PORT = int(os.environ.get("PORT", os.environ.get("DBAOPS_A2A_PORT", "8080")))
 PUBLIC_URL = os.environ.get("DBAOPS_A2A_URL", f"http://127.0.0.1:{PORT}/")
 RECURSION_LIMIT = int(os.environ.get("SINGLE_RECURSION_LIMIT", "80"))
 DEFAULT_WINDOW_HOURS = int(os.environ.get("A2A_DEFAULT_WINDOW_HOURS", "1"))
@@ -125,24 +127,69 @@ def build_app() -> A2AStarletteApplication:
     return A2AStarletteApplication(agent_card=build_agent_card(), http_handler=handler)
 
 
-def serve_in_thread() -> "threading.Thread":
-    """A2A 서버를 데몬 스레드로 기동 — runtime_entry(:8080)와 같은 프로세스에서 서빙."""
-    import threading
+# ───────────── /invocations — UI/Slack용 (runtime_entry 규약 그대로) ─────────────
 
-    def _run():
-        app = build_app().build()
-        uvicorn.run(app, host=HOST, port=PORT,
-                    log_level=os.environ.get("LOG_LEVEL", "info").lower())
+async def _invocations(request: Request):
+    """기존 runtime_entry의 POST /invocations 와 동일 규약:
+    {"request": {...}} → stream=true/Accept:ndjson 이면 NDJSON 이벤트 스트림,
+    아니면 동기 JSON 하나. pipeline/single 모드 모두 지원."""
+    import anyio
+    from dbaops_agent.runtime_entry import handler as sync_handler
 
-    t = threading.Thread(target=_run, name="a2a-server", daemon=True)
-    t.start()
-    print(f"DBAOps A2A server thread on {HOST}:{PORT} (card url: {PUBLIC_URL})")
-    return t
+    try:
+        event = await request.json()
+    except Exception:  # noqa: BLE001
+        event = {}
+    req = event.get("request") or {}
+    stream = (req.get("stream") is True
+              or "ndjson" in (request.headers.get("accept") or "").lower())
+
+    if not stream:
+        result = await anyio.to_thread.run_sync(lambda: sync_handler(event))
+        return JSONResponse(result)
+
+    mode = (req.get("mode") or "pipeline").lower()
+
+    def _sync_gen():
+        if mode == "swarm":
+            yield {"type": "error", "error": "mode=swarm has been removed; use mode=pipeline."}
+            return
+        if mode == "single":
+            from dbaops_agent.single_graph import iter_single
+            yield from iter_single(req, recursion_limit=RECURSION_LIMIT)
+        else:
+            from dbaops_agent.pipeline_graph import iter_pipeline
+            yield from iter_pipeline(req)
+
+    async def gen():
+        # 동기 제너레이터(LLM/도구 blocking)를 스레드에서 한 스텝씩 당겨온다
+        it = _sync_gen()
+        while True:
+            try:
+                ev = await anyio.to_thread.run_sync(lambda: next(it, None))
+            except Exception as e:  # noqa: BLE001
+                logger.exception("invocations stream failed")
+                yield (json.dumps({"type": "error", "error": str(e)}) + "\n").encode()
+                return
+            if ev is None:
+                return
+            yield (json.dumps(ev, ensure_ascii=False, default=str) + "\n").encode()
+
+    return StreamingResponse(gen(), media_type="application/x-ndjson")
+
+
+async def _healthz(_request: Request):
+    return JSONResponse({"status": "ok"})
 
 
 def main():
     app = build_app().build()
-    print(f"DBAOps native A2A server on {HOST}:{PORT} (card url: {PUBLIC_URL})")
+    # UI/Slack용 라우트를 같은 앱·같은 포트에 추가
+    app.router.routes.append(Route("/invocations", _invocations, methods=["POST"]))
+    app.router.routes.append(Route("/invoke", _invocations, methods=["POST"]))
+    app.router.routes.append(Route("/ping", _healthz, methods=["GET"]))
+    app.router.routes.append(Route("/healthz", _healthz, methods=["GET"]))
+    print(f"DBAOps server (A2A + /invocations) on {HOST}:{PORT} (card url: {PUBLIC_URL})")
     uvicorn.run(app, host=HOST, port=PORT, log_level=os.environ.get("LOG_LEVEL", "info").lower())
 
 

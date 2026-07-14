@@ -42,7 +42,7 @@ AWS_REGION = os.environ.get("AWS_REGION", "ap-northeast-2")
 # perf 전용 모델(PERF_BEDROCK_MODEL_ID) 우선 — DBAOps의 BEDROCK_MODEL_ID(opus)와 분리.
 BEDROCK_MODEL_ID = os.environ.get("PERF_BEDROCK_MODEL_ID") or os.environ.get(
     "BEDROCK_MODEL_ID", "global.anthropic.claude-sonnet-4-5-20250929-v1:0")
-OPS_A2A_URL = os.environ.get("OPS_A2A_URL", "http://127.0.0.1:9102")
+OPS_A2A_URL = os.environ.get("OPS_A2A_URL", "http://127.0.0.1:8080")
 ENABLE_A2A = os.environ.get("ENABLE_A2A", "1") == "1"
 ENABLE_VALIDATION = os.environ.get("PERF_VALIDATION", "1") == "1"
 RECURSION_LIMIT = int(os.environ.get("PERF_RECURSION_LIMIT", "60"))
@@ -62,7 +62,7 @@ def get_llm() -> ChatBedrockConverse:
 # ───────────────────── A2A peer 도구 (dbaops) ─────────────────────
 
 async def _a2a_ask_dbaops(question: str) -> str:
-    """DBAOps native A2A(:9102)에 질문을 보내고 응답 텍스트를 평문으로 수집."""
+    """DBAOps A2A(:8080)에 질문을 보내고 응답 텍스트를 평문으로 수집."""
     async with httpx.AsyncClient(timeout=A2A_CLIENT_TIMEOUT) as hc:
         card = await A2ACardResolver(httpx_client=hc, base_url=OPS_A2A_URL).get_agent_card()
         client = ClientFactory(ClientConfig(httpx_client=hc, streaming=False)).create(card)

@@ -172,28 +172,8 @@ class _Handler(BaseHTTPRequestHandler):
                 pass
 
 
-def _start_a2a_thread() -> None:
-    """같은 프로세스에서 A2A 서버(:9102)를 데몬 스레드로 함께 서빙.
-
-    dbaops/a2a_server.py 는 패키지 밖(레포 dbaops/ 루트)에 있으므로 경로를 잡아
-    import 한다. DBAOPS_A2A_ENABLED=0 으로 끌 수 있다(기본 켬). 실패해도 :8080
-    HTTP 서빙은 계속한다.
-    """
-    if os.environ.get("DBAOPS_A2A_ENABLED", "1") != "1":
-        logger.info("A2A server disabled (DBAOPS_A2A_ENABLED=0)")
-        return
-    try:
-        dbaops_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
-        if dbaops_root not in sys.path:
-            sys.path.insert(0, dbaops_root)
-        import a2a_server
-        a2a_server.serve_in_thread()
-    except Exception:  # noqa: BLE001
-        logger.exception("A2A server thread failed to start — HTTP(:8080)만 서빙")
-
-
 def serve(host: str = "0.0.0.0", port: int = 8080) -> None:
-    _start_a2a_thread()
+    # 레거시 단독 서버 — 정식 진입점은 dbaops/a2a_server.py (A2A + /invocations 통합, 한 포트)
     srv = ThreadingHTTPServer((host, port), _Handler)
     logger.info("serving on %s:%d", host, port)
     srv.serve_forever()

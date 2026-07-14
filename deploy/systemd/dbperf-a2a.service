@@ -13,7 +13,7 @@ Environment=PERF_BEDROCK_MODEL_ID=global.anthropic.claude-sonnet-4-5-20250929-v1
 Environment=A2A_PERF_HOST=0.0.0.0
 Environment=A2A_PERF_PORT=9100
 Environment=A2A_PERF_URL=http://127.0.0.1:9100
-Environment=OPS_A2A_URL=http://127.0.0.1:9102
+Environment=OPS_A2A_URL=http://127.0.0.1:8080
 ExecStart=__VENV__/bin/python a2a_perf_server.py
 Restart=always
 RestartSec=3

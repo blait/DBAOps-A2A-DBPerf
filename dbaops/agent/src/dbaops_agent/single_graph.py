@@ -55,7 +55,7 @@ def _all_tools() -> list:
     global _TOOLS_CACHE
     if _TOOLS_CACHE is None:
         _TOOLS_CACHE = build_mcp_tools(max_response_chars=12000)
-        # 동료 Perf 에이전트(A2A) 위임 도구 — HTTP(:8080)/A2A(:9102) 모든 경로에 포함.
+        # 동료 Perf 에이전트(A2A) 위임 도구 — /invocations·A2A 모든 경로에 포함(:8080 통합).
         from . import perf_peer
         if perf_peer.ENABLED:
             _TOOLS_CACHE.append(perf_peer.PERF_TOOL)

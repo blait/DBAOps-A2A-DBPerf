@@ -3,7 +3,7 @@ streamlit_app.py - Query Performance Agent Streamlit UI (DBAOps-Agent 스타일)
 
 탭 3개:
   ⚡ Query Performance — 우리 perf 에이전트와 채팅 (A2A :9100 경유)
-  🧭 DBAOps Ops Agent  — DBAOps RCA 에이전트와 채팅 (native A2A :9102)
+  🧭 DBAOps Ops Agent  — DBAOps RCA 에이전트와 채팅 (A2A :8080)
   🔌 연동 관리          — DB/Slack/A2A/Runtime 상태 확인, Slack 등록·테스트
 
 두 채팅 탭 모두 A2A 서버를 통해 호출하므로, 에이전트 간(A2A) 경로와
@@ -26,7 +26,7 @@ import connections
 
 st.set_page_config(page_title="SQL Server DBOps", layout="wide")
 st.title("SQL Server DBOps — Query Performance × DBAOps")
-st.caption("stdio MCP 도구 13개 + native A2A 연동 (perf :9100 ↔ DBAOps :9102)")
+st.caption("멀티엔진 도구 13개 + 상호 A2A (perf :9100 ↔ DBAOps :8080 — 에이전트당 포트 하나)")
 
 AGENTS = [
     {
@@ -209,7 +209,7 @@ def render_connections_tab() -> None:
         "slack": ("💬 Slack", "Bot Token (chat.postMessage)"),
         "dbaops_agent": ("🧭 DBAOps Agent", "DBAOps agent (127.0.0.1:8080)"),
         "a2a_performance_agent": ("🔗 A2A — Perf Agent :9100", "우리 쿼리 성능 에이전트"),
-        "a2a_dbaops_facade": ("🔗 A2A — DBAOps :9102", "DBAOps native A2A 서버"),
+        "a2a_dbaops": ("🔗 A2A — DBAOps :8080", "DBAOps 통합 서버 (A2A+스트리밍)"),
     }
     for key, status in st.session_state["conn_status"].items():
         label, hint = labels.get(key, (key, ""))
@@ -258,8 +258,8 @@ with st.sidebar:
         "Streamlit :8502\n"
         "  ├─ A2A → perf agent :9100\n"
         "  │         └─ stdio MCP (13 tools)\n"
-        "  │         └─ A2A → DBAOps :9102\n"
-        "  └─ A2A → DBAOps :9102 (native)\n"
+        "  │         └─ A2A → DBAOps :8080\n"
+        "  └─ A2A → DBAOps :8080\n"
         "            └─ single_graph → MCP router :9000\n"
         "            └─ A2A → perf agent :9100",
         language=None,

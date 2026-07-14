@@ -59,7 +59,7 @@ PERFENV
 fi
 
 echo "    systemd 유닛 설치 (dbperf-a2a / dbperf-streamlit)"
-# DBAOps A2A(:9102)는 dbaops-agent 프로세스가 겸용 — 별도 유닛 없음
+# DBAOps A2A는 dbaops-agent(:8080)가 겸용 — 별도 유닛 없음
 # Perf 유닛
 for unit in dbperf-a2a dbperf-streamlit dbperf-slack-bot; do
   sed -e "s|__PERF__|$PERF_DIR|g" \
@@ -82,7 +82,7 @@ echo ""
 echo "완료. 확인:"
 echo "  systemctl status dbaops-agent dbperf-a2a dbperf-streamlit --no-pager"
 echo "  curl -s http://localhost:9100/.well-known/agent-card.json | python3 -c 'import sys,json;print(json.load(sys.stdin)[\"name\"])'"
-echo "  curl -s http://localhost:9102/.well-known/agent-card.json | python3 -c 'import sys,json;print(json.load(sys.stdin)[\"name\"])'"
+echo "  curl -s http://localhost:8080/.well-known/agent-card.json | python3 -c 'import sys,json;print(json.load(sys.stdin)[\"name\"])'"
 echo "  브라우저: http://<EC2-IP>:8501 (DBAOps)   http://<EC2-IP>:8502 (Perf)"
 echo ""
 echo "다음: /etc/dbaops/dbaops.env 에 DB 시크릿/Slack 채널 확인 후"

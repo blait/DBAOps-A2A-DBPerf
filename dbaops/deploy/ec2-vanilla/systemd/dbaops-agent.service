@@ -1,5 +1,5 @@
-# DBAOps Agent — LangGraph 에이전트, 한 프로세스가 두 포트 서빙:
-#   :8080 HTTP /invocations (UI·Slack)  +  :9102 A2A (perf 에이전트)
+# DBAOps Agent — 프로세스 1개 · 포트 1개(:8080):
+#   A2A (perf 에이전트) + /invocations NDJSON 스트리밍 (UI·Slack) 통합 서빙
 [Unit]
 Description=DBAOps Agent
 After=network-online.target dbaops-mcp-router.service
@@ -9,16 +9,15 @@ Requires=dbaops-mcp-router.service
 [Service]
 Type=simple
 User=__USER__
-WorkingDirectory=__REPO__/agent
+WorkingDirectory=__REPO__
 EnvironmentFile=/etc/dbaops/dbaops.env
+Environment=PYTHONPATH=__REPO__
 Environment=GATEWAY_ENDPOINT=http://127.0.0.1:9000/mcp
 Environment=DBAOPS_DATA_DIR=__DATA__
 Environment=PORT=8080
-Environment=DBAOPS_A2A_HOST=0.0.0.0
-Environment=DBAOPS_A2A_PORT=9102
-Environment=DBAOPS_A2A_URL=http://127.0.0.1:9102/
+Environment=DBAOPS_A2A_URL=http://127.0.0.1:8080/
 Environment=PERF_A2A_URL=http://127.0.0.1:9100
-ExecStart=__VENV__/bin/python -m dbaops_agent.runtime_entry
+ExecStart=__VENV__/bin/python a2a_server.py
 Restart=always
 RestartSec=3
 

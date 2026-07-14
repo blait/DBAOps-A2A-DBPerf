@@ -2,7 +2,7 @@
 
 DBAOps 에이전트가 SQL Server 쿼리 성능 질문을 Perf 에이전트에 위임할 때 쓴다.
 single_graph 가 도구 목록과 시스템 프롬프트에 직접 포함하므로, HTTP(:8080)
-경로(UI/Slack)와 A2A(:9102) 경로 모두 동일하게 위임이 동작한다.
+경로(UI/Slack)와 A2A 경로(:8080 통합) 모두 동일하게 위임이 동작한다.
 
 ENABLE_PERF_PEER=0 으로 끌 수 있다 (기본 켬).
 """

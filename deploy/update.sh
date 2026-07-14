@@ -20,7 +20,7 @@ echo "==> [2/2] Perf + DBAOps A2A 갱신"
 "$VENV/bin/pip" install -q -r "$PERF_DIR/requirements.txt"
 "$VENV/bin/pip" install -q a2a-sdk uvicorn
 
-# DBAOps A2A(:9102)는 dbaops-agent 프로세스가 겸용 — 별도 유닛 없음
+# DBAOps A2A는 dbaops-agent(:8080)가 겸용 — 별도 유닛 없음
 # Perf 유닛
 for unit in dbperf-a2a dbperf-streamlit dbperf-slack-bot; do
   sed -e "s|__PERF__|$PERF_DIR|g" -e "s|__VENV__|$VENV|g" -e "s|__USER__|$RUN_USER|g" \
@@ -30,4 +30,4 @@ done
 sudo systemctl daemon-reload
 sudo systemctl restart dbperf-a2a dbperf-streamlit
 systemctl is-enabled dbperf-slack-bot >/dev/null 2>&1 && sudo systemctl restart dbperf-slack-bot || true
-echo "완료. curl -s http://localhost:9102/.well-known/agent-card.json"
+echo "완료. curl -s http://localhost:8080/.well-known/agent-card.json"
