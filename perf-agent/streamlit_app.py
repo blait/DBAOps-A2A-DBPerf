@@ -99,9 +99,10 @@ _STAGE_LABEL = {"analyze": "🔎 분석", "validate": "🧪 검증",
                 "revise": "✍️ 보정", "report": "📝 리포트 생성"}
 
 
-def perf_ask_stream(base_url: str, text: str, session_id: str, status_slot) -> str:
-    """perf 서버 /invocations NDJSON 스트림 소비 — 진행상황을 status_slot에 갱신하고
-    최종 report markdown을 반환. (dbaops UI의 이벤트 규약과 동일)"""
+def perf_ask_stream(base_url: str, text: str, session_id: str, status_slot,
+                    thought_exp=None) -> str:
+    """perf 서버 /invocations NDJSON 스트림 소비 — dbaops UI와 같은 자연스러운 형태.
+    상태 한 줄(status_slot) + 접이식 사고 과정(thought_exp) 갱신, 최종 markdown 반환."""
     import json as _json
     payload = {"request": {"free_text": text, "session_id": session_id, "stream": True}}
     final_md, tool_calls = "", 0
@@ -118,20 +119,34 @@ def perf_ask_stream(base_url: str, text: str, session_id: str, status_slot) -> s
             et = ev.get("type")
             if et == "stage":
                 label = _STAGE_LABEL.get(ev.get("stage", ""), ev.get("stage", ""))
-                status_slot.caption(f"{label} 완료 (tool calls: {tool_calls})")
+                status_slot.caption(f"🔄 {label} 완료")
             elif et == "message":
                 m = ev.get("message") or {}
                 tcs = m.get("tool_calls") or []
-                if tcs:
+                mtext = (m.get("text") or "").strip()
+                if m.get("role") == "ai" and tcs:
                     tool_calls += len(tcs)
-                    preamble = (m.get("text") or "").strip()
-                    if preamble:
-                        status_slot.caption(f"💬 {preamble[:200]}")
+                    if mtext:
+                        status_slot.caption(f"💬 {mtext[:200]}")
                     else:
                         names = ", ".join(tc.get("name", "?") for tc in tcs)
-                        status_slot.caption(f"🔧 {names} 호출 중… (tool calls: {tool_calls})")
+                        status_slot.caption(f"🛠️ {names} 확인 중… (도구 {tool_calls}회)")
+                    if thought_exp is not None:
+                        with thought_exp:
+                            if mtext:
+                                st.markdown(mtext)
+                            for tc in tcs:
+                                st.caption(f"🛠️ `{tc.get('name','?')}`")
+                elif m.get("role") == "tool" and thought_exp is not None:
+                    with thought_exp:
+                        st.caption(f"↩︎ `{m.get('name') or 'tool'}` 결과 수신")
+                elif m.get("role") == "ai" and mtext and thought_exp is not None:
+                    with thought_exp:
+                        st.markdown(mtext)
             elif et == "validation":
-                status_slot.caption("✅ 검증 통과" if ev.get("passed") else "⚠️ 검증 이슈 — 보정 중")
+                if thought_exp is not None:
+                    with thought_exp:
+                        st.caption("🧐 검증 통과" if ev.get("passed") else "🧐 검증 이슈 — 재분석")
             elif et == "report":
                 final_md = ev.get("markdown") or ""
             elif et == "error":
@@ -169,12 +184,13 @@ def render_chat_tab(a: dict) -> None:
         t0 = time.time()
         ctx = st.session_state[f"ctx__{a['key']}"]
         if a["key"] == "perf":
-            # perf — /invocations NDJSON 스트리밍 (진행상황 실시간 표시)
+            # perf — NDJSON 스트리밍: 상태 한 줄 + 접이식 사고 과정 + 답변
             status_slot = st.empty()
             status_slot.caption("⏳ 분석 시작…")
+            thought_exp = st.expander("🧠 사고 과정", expanded=False)
             try:
-                answer = perf_ask_stream(a["url"], prompt, ctx, status_slot)
-                status_slot.empty()
+                answer = perf_ask_stream(a["url"], prompt, ctx, status_slot, thought_exp)
+                status_slot.caption("✅ 완료")
             except Exception as e:
                 status_slot.empty()
                 answer = f"❌ 호출 실패: {e}\n\n서버 기동 여부를 연동 관리 탭에서 확인하세요."

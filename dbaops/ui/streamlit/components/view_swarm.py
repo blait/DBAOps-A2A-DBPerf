@@ -761,11 +761,9 @@ def _render_message(m: dict, *, container=None) -> None:
                     target.json(obj, expanded=False)
         return
 
-    # ai (specialist)
+    # ai
     avatar = _AGENT_AVATAR.get(name, "🤖")
     with target.chat_message("assistant", avatar=avatar):
-        if name:
-            target.markdown(f"**{_agent_chip(name)}**")
         if text:
             target.markdown(text)
 
@@ -773,8 +771,7 @@ def _render_message(m: dict, *, container=None) -> None:
             tname = tc.get("name") or "?"
             args = tc.get("args") or {}
             if _is_handoff_tool(tname):
-                target.markdown(f"➡️ **handoff** · `{tname}`  ·  {_short_args(args)}")
-                continue
+                continue   # 핸드오프는 내부 라우팅 — UI에 표시하지 않음
             target.markdown(f"🛠️ **tool_call** · `{tname}`")
             if isinstance(args, dict):
                 _render_kv_table(target, args)
@@ -786,214 +783,148 @@ def _render_message(m: dict, *, container=None) -> None:
 
 
 def render(result: dict, request: dict | None = None) -> None:
-    """이미 받아둔 swarm 결과(dict) 를 한꺼번에 렌더."""
+    """이미 받아둔 결과(dict)를 자연스러운 형태로 렌더 — 답변 본문 + 차트,
+    사고 과정(도구 호출 로그)은 접이식."""
     if "error" in result:
         st.error(result["error"])
         return
 
-    handoffs = result.get("handoffs") or []
-    final = result.get("final_active_agent") or "(unknown)"
-    aborted = result.get("aborted")
-
-    cols = st.columns([3, 1, 1, 1])
-    if request:
-        tr = request.get("time_range") or {}
-        cols[0].markdown(
-            f"**lens=`{request.get('lens','?')}`** · `{tr.get('start','?')[:19]}` → `{tr.get('end','?')[:19]}`  \n"
-            f"target: {', '.join(request.get('targets') or []) or '—'}"
-        )
-    cols[1].metric("핸드오프", max(0, len(handoffs) - 1))
-    cols[2].metric("최종 specialist", final.split("_")[0] if "_" in final else final)
-    if aborted:
-        cols[3].metric("⚠️ 중단", aborted)
-
-    if handoffs:
-        st.divider()
-        st.markdown("### 🔁 핸드오프 시퀀스")
-        st.markdown(" → ".join(_agent_chip(a) for a in handoffs))
-
-    st.divider()
-    st.markdown("### 💬 Specialist 대화")
     msgs = result.get("messages") or []
     if not msgs:
         st.info("메시지 없음.")
         return
 
-    # validation / report 메타가 박힌 메시지는 별도 카드로, 나머지는 일반 렌더
-    for m in msgs:
-        if m.get("name") == "validation_agent" and m.get("_validation"):
-            v = m["_validation"]
-            with st.container(border=True):
-                if v.get("passed"):
-                    st.success("🧐 검증 통과 — 이슈 0건")
-                else:
-                    issues = v.get("issues") or []
-                    st.warning(f"🧐 검증 실패 — 이슈 {len(issues)}건")
-                    for it in issues:
-                        st.caption(f"- `{it.get('kind','?')}` · {(it.get('detail') or '')[:300]}")
-            continue
-        if m.get("name") == "report_agent" and (m.get("text") or m.get("_charts")):
-            with st.container(border=True):
-                st.markdown("### 📝 리포트")
-                _render_report(m.get("text") or "", m.get("_charts") or [], msgs)
-            continue
-        _render_message(m)
-
-    # report 메시지가 없을 때 fallback (구 형식 호환)
-    has_report = any(m.get("name") == "report_agent" for m in msgs)
-    if not has_report:
+    # 최종 답변: report_agent 메시지 우선, 없으면 마지막 자연어 ai 메시지
+    report_msg = next((m for m in reversed(msgs) if m.get("name") == "report_agent"), None)
+    if report_msg:
+        _render_report(report_msg.get("text") or "", report_msg.get("_charts") or [], msgs)
+    else:
         last_ai = next(
             (m for m in reversed(msgs)
              if m.get("role") == "ai" and not m.get("tool_calls") and (m.get("text") or "").strip()),
             None,
         )
         if last_ai:
-            with st.container(border=True):
-                st.markdown("### 📤 최종 정리")
-                st.caption(f"by {_agent_chip(last_ai.get('name'))}")
-                st.markdown(last_ai.get("text") or "")
-                _render_supervisor_charts(st, msgs)
+            st.markdown(last_ai["text"])
+            _render_supervisor_charts(st, msgs)
+
+    # 검증 결과 한 줄 (있을 때만)
+    v = next((m.get("_validation") for m in msgs if m.get("_validation")), None)
+    if v is not None:
+        st.caption("🧐 검증 통과" if v.get("passed") else f"🧐 검증 이슈 {len(v.get('issues') or [])}건 → 재분석 수행")
+
+    with st.expander("🧠 사고 과정", expanded=False):
+        for m in msgs:
+            if m.get("name") in ("validation_agent", "report_agent"):
+                continue
+            _render_message(m)
 
 
 # ───────────────────────── Streaming ─────────────────────────
 
 
 def render_stream(events: Iterator[dict], request: dict | None = None) -> dict:
-    """invoke_stream() 의 NDJSON 이벤트를 받아 실시간 렌더하고, 누적 결과를 반환.
+    """invoke_stream() 의 NDJSON 이벤트를 자연스러운 채팅 형태로 렌더.
 
-    반환 dict 는 비스트리밍 render() 의 입력과 동일한 구조 (messages/handoffs/final/aborted).
+    고정 UI(메트릭 카드·핸드오프 시퀀스·specialist 라벨) 없이:
+      - 진행 중: 상태 한 줄 + 접이식 '🧠 사고 과정'(도구 호출/결과 로그)
+      - 완료: 최종 답변 본문 + 차트 이미지
+    반환 dict 는 비스트리밍 render() 입력과 동일 구조 (messages/handoffs/final/aborted).
     """
-    # ── 헤더 placeholder ──
-    header_box = st.container()
-    cols = header_box.columns([3, 1, 1, 1])
-    if request:
-        tr = request.get("time_range") or {}
-        cols[0].markdown(
-            f"**lens=`{request.get('lens','?')}`** · `{tr.get('start','?')[:19]}` → `{tr.get('end','?')[:19]}`  \n"
-            f"target: {', '.join(request.get('targets') or []) or '—'}"
-        )
-    handoff_metric = cols[1].empty()
-    active_metric = cols[2].empty()
-    abort_metric = cols[3].empty()
+    status_box = st.empty()
+    status_box.caption("⏳ 분석 시작…")
 
-    handoffs: list[str] = []
-    handoff_metric.metric("핸드오프", 0)
-
-    # ── 핸드오프 chip 영역 ──
-    st.divider()
-    st.markdown("### 🔁 핸드오프 시퀀스")
-    handoff_chip_box = st.empty()
-    handoff_chip_box.caption("(시작 전)")
-
-    st.divider()
-    st.markdown("### 💬 Specialist 대화 (실시간)")
-    log_box = st.container()  # 메시지가 누적될 컨테이너
+    # 사고 과정(도구 호출·중간 발화)은 접어서 — 원하는 사람만 펼쳐본다
+    thought_exp = st.expander("🧠 사고 과정", expanded=False)
 
     messages: list[dict] = []
+    handoffs: list[str] = []
     aborted: str | None = None
     final_active: str | None = None
     err: str | None = None
+    reported = False
+    n_tools = 0
 
-    status_box = st.empty()
-    status_box.caption("⏳ 대기 중...")
+    answer_box = st.container()  # 최종 답변이 놓일 자리
 
-    n_messages = 0
     for ev in events:
         t = ev.get("type")
 
         if t == "start":
-            entry = ev.get("entry")
             reason = ev.get("reasoning")
-            if entry:
-                # 첫 active_agent 가 곧 이 entry 로 들어오므로 handoffs 에는 append 하지 않는다 — 중복 방지.
-                active_metric.metric(
-                    "현재 specialist",
-                    entry.split("_")[0] if "_" in entry else entry,
-                )
-                if reason:
-                    status_box.caption(f"▶ 시작 → {_agent_chip(entry)} · {reason}")
-                else:
-                    status_box.caption(f"▶ 시작 → {_agent_chip(entry)}")
-            else:
-                status_box.caption("▶ 분석 시작")
+            status_box.caption(f"⏳ {reason}" if reason else "⏳ 분석 중…")
         elif t == "handoff":
-            agent = ev.get("agent") or "?"
-            handoffs.append(agent)
-            handoff_metric.metric("핸드오프", max(0, len(handoffs) - 1))
-            active_metric.metric(
-                "현재 specialist",
-                agent.split("_")[0] if "_" in agent else agent,
-            )
-            handoff_chip_box.markdown(" → ".join(_agent_chip(a) for a in handoffs))
-            status_box.caption(f"➡️ 핸드오프 → {_agent_chip(agent)}")
+            handoffs.append(ev.get("agent") or "?")   # 결과 dict 호환용 — UI 표시는 안 함
         elif t == "message":
             msg = ev.get("message") or {}
             messages.append(msg)
-            n_messages += 1
-            with log_box:
-                _render_message(msg)
-            status_box.caption(f"💬 메시지 {n_messages}건 누적")
-        elif t == "abort":
-            aborted = ev.get("reason")
-            abort_metric.metric("⚠️ 중단", aborted or "abort")
-            status_box.warning(f"⚠️ 중단: {aborted}")
+            role = msg.get("role")
+            text = (msg.get("text") or "").strip()
+            tcs = msg.get("tool_calls") or []
+            if role == "ai" and tcs:
+                n_tools += len(tcs)
+                # 도구 직전 예고 문장이 있으면 그대로 상태로 (Claude Code 식 진행 중계)
+                if text:
+                    status_box.caption(f"💬 {text[:200]}")
+                else:
+                    names = ", ".join(tc.get("name", "?") for tc in tcs)
+                    status_box.caption(f"🛠️ {names} 확인 중… (도구 {n_tools}회)")
+                with thought_exp:
+                    if text:
+                        st.markdown(text)
+                    for tc in tcs:
+                        st.caption(f"🛠️ `{tc.get('name','?')}` · {_short_args(tc.get('args') or {})}")
+            elif role == "tool":
+                with thought_exp:
+                    st.caption(f"↩︎ `{msg.get('name') or 'tool'}` 결과 수신")
+            elif role == "ai" and text:
+                # 자연어 중간 발화도 사고 과정에 쌓아둠 (최종 답변은 done/report에서)
+                with thought_exp:
+                    st.markdown(text)
         elif t == "stage":
             stage = ev.get("stage", "?")
-            stage_label = {"domain": "분석", "validation": "검증", "revise": "재분석", "report": "리포트"}.get(stage, stage)
-            status_box.caption(f"🔄 stage `{stage_label}` 완료")
+            label = {"domain": "분석", "analyze": "분석", "single": "분석",
+                     "validation": "검증", "validate": "검증",
+                     "revise": "재분석", "report": "리포트 작성", "route": "경로 판정"}.get(stage, stage)
+            status_box.caption(f"🔄 {label} 완료")
         elif t == "validation":
             passed = ev.get("passed", True)
             issues = ev.get("issues") or []
-            with log_box:
-                with st.container(border=True):
-                    if passed:
-                        st.success(f"🧐 검증 통과 — 이슈 0건")
-                    else:
-                        st.warning(f"🧐 검증 실패 — 이슈 {len(issues)}건 (재분석 진행)")
-                        for it in issues:
-                            kind = it.get("kind", "?")
-                            detail = (it.get("detail") or "")[:300]
-                            st.caption(f"- `{kind}` · {detail}")
-            validation_result = {"passed": passed, "issues": issues}
+            with thought_exp:
+                if passed:
+                    st.caption("🧐 검증 통과")
+                else:
+                    st.caption(f"🧐 검증 이슈 {len(issues)}건 — 재분석")
             messages.append({"role": "ai", "name": "validation_agent", "text": "", "tool_calls": [],
-                             "_validation": validation_result})
+                             "_validation": {"passed": passed, "issues": issues}})
         elif t == "report":
             md = ev.get("markdown") or ""
             charts = ev.get("charts") or []
-            with log_box:
-                with st.container(border=True):
-                    st.markdown("### 📝 리포트")
-                    _render_report(md, charts, messages)
+            with answer_box:
+                _render_report(md, charts, messages)
             messages.append({"role": "ai", "name": "report_agent", "text": md, "tool_calls": [],
                              "_charts": charts})
+            reported = True
+        elif t == "abort":
+            aborted = ev.get("reason")
+            status_box.warning(f"⚠️ 중단: {aborted}")
         elif t == "error":
             err = ev.get("error")
             status_box.error(f"❌ {err}")
             break
         elif t == "done":
             final_active = ev.get("final_active_agent")
-            if final_active:
-                active_metric.metric(
-                    "최종 specialist",
-                    final_active.split("_")[0] if "_" in final_active else final_active,
-                )
-            status_box.success(f"✅ 완료 · 메시지 {n_messages}건 · 핸드오프 {max(0, len(handoffs) - 1)}회")
-
-            # report 이벤트가 안 왔을 때만 fallback 으로 최종 정리 카드
-            already_reported = any(m.get("name") == "report_agent" for m in messages)
-            if not already_reported:
+            status_box.caption(f"✅ 완료 · 도구 {n_tools}회 사용" if n_tools else "✅ 완료")
+            if not reported:
                 last_ai = next(
                     (m for m in reversed(messages)
                      if m.get("role") == "ai" and not m.get("tool_calls") and (m.get("text") or "").strip()),
                     None,
                 )
                 if last_ai and last_ai.get("text"):
-                    with log_box:
-                        with st.container(border=True):
-                            st.markdown("### 📤 최종 정리")
-                            st.caption(f"by {_agent_chip(last_ai.get('name'))}")
-                            st.markdown(last_ai["text"])
-                            _render_supervisor_charts(st, messages)
+                    with answer_box:
+                        st.markdown(last_ai["text"])
+                        _render_supervisor_charts(st, messages)
 
     return {
         "messages": messages,

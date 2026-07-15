@@ -148,7 +148,7 @@ def _render_supervisor_tab(s: dict) -> None:
             st.caption(_summarize_turn(turn))
             sw = turn.get("swarm") or {}
             if sw:
-                with st.expander("🐝 Supervisor 대화 / 최종 정리", expanded=True):
+                with st.container():
                     view_swarm.render(sw, request={
                         "supervisor": sup_key,
                         "free_text":  turn.get("free_text"),
