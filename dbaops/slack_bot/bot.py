@@ -135,7 +135,7 @@ def _run_chat(client, channel: str, thread_ts: str, status_ts: str,
         )
         logger.info("thread %s: injected %d chars of history", thread_ts, len(ctx))
     request = {
-        "mode": "single",
+        "mode": "auto",     # LLM 라우터가 판정 — 보고서 요청이면 pipeline, 아니면 single
         "free_text": free_text,
         "time_range": _window(),
         "session_id": _session_id(thread_ts),   # 스레드 = 세션 → agent 가 이전 맥락 기억

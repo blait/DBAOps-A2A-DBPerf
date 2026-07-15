@@ -144,11 +144,20 @@ async def _invocations(request: Request):
     stream = (req.get("stream") is True
               or "ndjson" in (request.headers.get("accept") or "").lower())
 
+    # mode=auto(또는 미지정): LLM 라우터가 보고서 요청인지 판정해 single/pipeline 선택
+    mode = (req.get("mode") or "auto").lower()
+    if mode == "auto":
+        from dbaops_agent.router import decide
+        mode, domain = await anyio.to_thread.run_sync(
+            lambda: decide(req.get("free_text") or ""))
+        req = {**req, "mode": mode}
+        if domain and not req.get("domain"):
+            req["domain"] = domain
+        event = {**event, "request": req}
+
     if not stream:
         result = await anyio.to_thread.run_sync(lambda: sync_handler(event))
         return JSONResponse(result)
-
-    mode = (req.get("mode") or "pipeline").lower()
 
     def _sync_gen():
         if mode == "swarm":

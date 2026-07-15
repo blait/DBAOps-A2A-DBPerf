@@ -1,21 +1,21 @@
 """
-perf_graph.py - SQL Server Query Performance 에이전트, LangGraph 기반 코어.
+perf_graph.py - Query Performance 에이전트, LangGraph 기반 코어.
 
-DBAOps(pipeline_graph)와 같은 설계 철학의 4노드 StateGraph:
+LLM 라우터가 요청 성격을 보고 두 경로 중 하나를 태운다 (ops와 동일한 정책):
 
-    START → analyze → validate ─┬→ report → END
-            (ReAct)   (검증)     └→ revise → report → END
-                                  (검증 실패 시 1회 재분석)
+    START → route ─┬→ single (ReAct 1방 — 대화·조회·가벼운 진단, 검증 없음, 빠름)
+                   └→ analyze → validate ─┬→ report → END   (보고서 파이프라인)
+                                          └→ revise → report → END
 
-- analyze : create_react_agent — Query Store/DMV 도구를 직접 골라 호출하는 RCA 루프
-- validate: 별도 LLM 호출로 분석 결과 검증 (도구 인용 없는 주장/빈 답변/포맷 위반 탐지)
-- revise  : 검증 지적사항을 주입해 1회 재분석 (루프 방지 위해 1회 한정)
-- report  : 최종 마크다운 리포트 정리
+- route   : 별도 LLM 1호출 — "보고서/감사가능한 산출물을 원하는가?"만 판정
+- single  : ops single_graph 스타일의 자유로운 ReAct — 짧고 대화체로 답
+- analyze~report : 기존 4노드 검증 파이프라인 (근거 검증 + 정형 리포트)
+
+강제 오버라이드: PERF_MODE=single|report (env) 또는 요청별 mode 인자.
+PERF_VALIDATION=0 이면 파이프라인에서 validate/revise 생략.
 
 도구는 기존 stdio MCP 서버(mcp_query_tools.py)를 langchain-mcp-adapters로 로드 +
 ask_dbaops_agent(A2A peer). MCP 세션은 호출자(서버/CLI)가 열어 tools를 주입한다.
-
-PERF_VALIDATION=0 이면 validate/revise 건너뛰고 analyze→report 직행 (지연 절감).
 """
 from __future__ import annotations
 
@@ -120,6 +120,56 @@ async def load_perf_tools(session) -> list[BaseTool]:
 
 # ───────────────────── 프롬프트 ─────────────────────
 
+# ── single 모드: ops single_graph 스타일 — 자유로운 대화형 ──
+SINGLE_PROMPT = """You are **Perf** — a senior DBA colleague who helps with query performance
+over chat. You answer in Korean, naturally, the way a sharp teammate would in Slack.
+You cover **SQL Server, PostgreSQL, MySQL** with one tool set (pass `target` to pick the DB;
+call list_db_targets() when unsure which one the user means).
+
+<how_you_work>
+Talk to the user, don't file reports at them. 답은 짧고 핵심만 — 간단한 질문엔 소제목·섹션 없이
+바로 답한다. 요청한 깊이에 맞춰라, 그 이상도 이하도 아니게.
+
+- 가벼운 질문(개념·방법·"이거 뭐야"·잡담)이면 그냥 대화로 답한다. 도구도 형식도 필요 없다.
+- 데이터를 묻는 질문("상위 쿼리 보여줘", "블로킹 있어?")이면 맞는 도구로 확인하고 핵심을
+  짧게 전한다. 표·차트는 도움 될 때만.
+- 도구를 쓰기 전에 한 문장으로 뭘 확인할지 말해라("mysql-poc 상위 쿼리 먼저 볼게요").
+  진행 중 발견·방향전환·막힘이 생기면 한 줄씩 알린다.
+- 답에 데이터가 들어가면 근거를 가볍게: 어떤 도구로 어떤 수치를 봤는지.
+- "이상 없음"은 실제로 확인했을 때만. 확실한 것과 추측은 말투로 구분한다.
+- 도구가 {"unsupported": ...}를 주면 그 제약을 정직하게 전달한다 — 지어내지 않는다.
+- 끝맺음은 한두 문장: 뭘 알아냈고 다음은 뭔지. 더 파볼 여지가 있으면 자연스럽게 권한다.
+</how_you_work>
+
+<peer_agent>
+동료: **DBAOps RCA agent** (ask_dbaops_agent, A2A). OS/호스트 메트릭, Kafka(MSK), 로그,
+RDS 이벤트 등 쿼리 튜닝 밖 인프라 질문은 그쪽에 위임하고 답을 출처와 함께 인용한다.
+쿼리 성능(mssql/pg/mysql)은 절대 위임하지 않는다 — 그건 네 일이다.
+</peer_agent>
+
+<charts>
+수치 비교가 핵심이고 사용자가 시각화를 원하면, 답 안에 이 형식의 코드블록을 넣는다
+(UI/Slack이 도구 결과 데이터와 매칭해 차트 이미지로 렌더):
+```json-chart
+{ "chart_type": "bar|line|scatter|histogram|table", "title": "<짧은 한글 제목>",
+  "source_tool_call_id": "<실제 호출한 도구 call id>", "x_field": "<dotted path>", "y_field": "<dotted path>" }
+```
+예) get_top_queries → x="queries[*].query_text", y="queries[*].calls".
+</charts>
+
+ONLY send Slack alerts when explicitly requested by the user."""
+
+# ── 라우터: single vs report 파이프라인 판정 (LLM 1호출) ──
+ROUTER_PROMPT = """You are a request router for a database performance agent.
+Decide if the user wants a FORMAL REPORT (audited, structured deliverable) or a normal chat answer.
+
+Choose REPORT only when the user explicitly asks for a report/summary document, an audit,
+a comprehensive analysis to share/keep ("보고서", "리포트로", "정리해서 문서로", "종합 분석해서
+보고", "감사용", "경영진에게"), or asks for validated findings.
+Everything else — questions, live checks, tuning advice, chart requests, casual chat — is SINGLE.
+
+Reply with EXACTLY one word: SINGLE or REPORT"""
+
 ANALYST_PROMPT = """You are a database query performance optimization specialist
 covering **SQL Server, PostgreSQL, and MySQL** (multi-engine tools with a `target` parameter).
 
@@ -189,13 +239,15 @@ _CHART_FENCE = re.compile(r"```json-chart\s*\n.*?\n```", re.DOTALL)
 # ───────────────────── State & 노드 ─────────────────────
 
 class PerfState(TypedDict):
-    messages: Annotated[list, add_messages]   # analyze ReAct 대화 (도구 호출 포함)
+    messages: Annotated[list, add_messages]   # ReAct 대화 (도구 호출 포함)
     user_input: str
-    analysis: str            # analyze 최종 텍스트
+    mode: str                # "" (라우터가 결정) | "single" | "report" (강제)
+    route: str               # 라우터 판정 결과: single | report
+    analysis: str            # analyze/single 최종 텍스트
     verdict: str             # PASS | FAIL | SKIP
     issues: str
     revised: bool
-    final: str               # report 결과
+    final: str               # 최종 답변
 
 
 def _last_ai_text(messages: list) -> str:
@@ -222,6 +274,29 @@ def build_graph(tools: list[BaseTool]):
     llm = get_llm()
     react = create_react_agent(model=llm, tools=tools,
                                prompt=SystemMessage(content=ANALYST_PROMPT))
+    react_single = create_react_agent(model=llm, tools=tools,
+                                      prompt=SystemMessage(content=SINGLE_PROMPT))
+
+    async def route(state: PerfState) -> dict:
+        forced = (state.get("mode") or os.environ.get("PERF_MODE", "")).lower()
+        if forced in ("single", "report"):
+            return {"route": forced}
+        resp = await llm.ainvoke([SystemMessage(content=ROUTER_PROMPT),
+                                  HumanMessage(content=state["user_input"][:2000])])
+        text = resp.content if isinstance(resp.content, str) else str(resp.content)
+        decision = "report" if "REPORT" in text.upper() else "single"
+        logger.info("router: %s", decision)
+        return {"route": decision}
+
+    async def single(state: PerfState) -> dict:
+        result = await react_single.ainvoke(
+            {"messages": state["messages"] + [HumanMessage(content=state["user_input"])]},
+            config={"recursion_limit": RECURSION_LIMIT},
+        )
+        msgs = result["messages"]
+        text = _last_ai_text(msgs) or "(응답 없음)"
+        return {"messages": msgs, "analysis": text, "final": text,
+                "verdict": "SKIP", "issues": ""}
 
     async def analyze(state: PerfState) -> dict:
         result = await react.ainvoke(
@@ -268,29 +343,40 @@ def build_graph(tools: list[BaseTool]):
             text = text + "\n\n" + "\n\n".join(orig_charts)
         return {"final": text}
 
-    def route(state: PerfState) -> Literal["revise", "report"]:
+    def pick_path(state: PerfState) -> Literal["single", "analyze"]:
+        return "single" if state["route"] == "single" else "analyze"
+
+    def after_validate(state: PerfState) -> Literal["revise", "report"]:
         if state["verdict"] == "FAIL" and not state.get("revised"):
             return "revise"
         return "report"
 
     g = StateGraph(PerfState)
+    g.add_node("route", route)
+    g.add_node("single", single)
     g.add_node("analyze", analyze)
     g.add_node("validate", validate)
     g.add_node("revise", revise)
     g.add_node("report", report)
-    g.add_edge(START, "analyze")
+    g.add_edge(START, "route")
+    g.add_conditional_edges("route", pick_path, {"single": "single", "analyze": "analyze"})
+    g.add_edge("single", END)
     g.add_edge("analyze", "validate")
-    g.add_conditional_edges("validate", route, {"revise": "revise", "report": "report"})
+    g.add_conditional_edges("validate", after_validate, {"revise": "revise", "report": "report"})
     g.add_edge("revise", "report")
     g.add_edge("report", END)
     return g.compile(checkpointer=InMemorySaver())
 
 
-async def run_perf(graph, user_input: str, thread_id: str = "default") -> str:
-    """그래프 1회 실행 → 최종 리포트 텍스트. thread_id로 대화 연속성 유지."""
+def _initial_state(user_input: str, mode: str = "") -> dict:
+    return {"messages": [], "user_input": user_input, "mode": mode, "route": "",
+            "analysis": "", "verdict": "", "issues": "", "revised": False, "final": ""}
+
+
+async def run_perf(graph, user_input: str, thread_id: str = "default", mode: str = "") -> str:
+    """그래프 1회 실행 → 최종 텍스트. mode=""(라우터 판단)|single|report."""
     out = await graph.ainvoke(
-        {"messages": [], "user_input": user_input, "analysis": "",
-         "verdict": "", "issues": "", "revised": False, "final": ""},
+        _initial_state(user_input, mode),
         config={"configurable": {"thread_id": thread_id},
                 "recursion_limit": RECURSION_LIMIT + 20},
     )
@@ -315,10 +401,10 @@ def _normalize_message(m) -> dict:
     return out
 
 
-async def iter_perf(graph, user_input: str, thread_id: str = "default"):
+async def iter_perf(graph, user_input: str, thread_id: str = "default", mode: str = ""):
     """그래프 실행을 스트리밍 — dbaops iter_single과 같은 이벤트 dict를 yield.
 
-    이벤트: start / stage(analyze·validate·revise·report) / message /
+    이벤트: start / stage(route·single·analyze·validate·revise·report) / message /
             validation / report / done / error
     Slack·Streamlit이 dbaops와 동일한 렌더러로 진행상황·차트를 그릴 수 있다.
     """
@@ -327,8 +413,7 @@ async def iter_perf(graph, user_input: str, thread_id: str = "default"):
 
     config = {"configurable": {"thread_id": thread_id},
               "recursion_limit": RECURSION_LIMIT + 20}
-    state = {"messages": [], "user_input": user_input, "analysis": "",
-             "verdict": "", "issues": "", "revised": False, "final": ""}
+    state = _initial_state(user_input, mode)
 
     seen: set[str] = set()
     final_out: dict = {}

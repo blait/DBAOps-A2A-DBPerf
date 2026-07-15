@@ -145,6 +145,10 @@ async def _invocations(request: Request):
     req = event.get("request") or {}
     user_text = req.get("free_text") or ""
     thread = f"inv:{req.get('session_id') or 'default'}"
+    # mode 미지정/auto → 그래프의 route 노드(LLM)가 single/report 판정
+    mode = (req.get("mode") or "").lower()
+    if mode in ("auto", "pipeline"):
+        mode = "" if mode == "auto" else "report"
     stream = (req.get("stream") is True
               or "ndjson" in (request.headers.get("accept") or "").lower())
 
@@ -154,12 +158,12 @@ async def _invocations(request: Request):
         return JSONResponse({"error": "perf graph not ready"}, status_code=503)
 
     if not stream:
-        answer = await perf_graph.run_perf(_GRAPH, user_text, thread_id=thread)
+        answer = await perf_graph.run_perf(_GRAPH, user_text, thread_id=thread, mode=mode)
         return JSONResponse({"result": answer, "request": req})
 
     async def gen():
         try:
-            async for ev in perf_graph.iter_perf(_GRAPH, user_text, thread_id=thread):
+            async for ev in perf_graph.iter_perf(_GRAPH, user_text, thread_id=thread, mode=mode):
                 yield (json.dumps(ev, ensure_ascii=False, default=str) + "\n").encode()
         except Exception as e:  # noqa: BLE001
             logger.exception("invocations stream failed")
