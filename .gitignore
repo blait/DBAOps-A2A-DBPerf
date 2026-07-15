@@ -8,3 +8,5 @@ my.cnf
 TEST_ACCESS.md
 .terraform/
 *.tfstate*
+*.pptx
+~$*
