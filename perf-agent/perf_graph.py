@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import uuid
 from typing import Annotated, Any, Literal
 
@@ -39,9 +40,9 @@ from typing_extensions import TypedDict
 logger = logging.getLogger(__name__)
 
 AWS_REGION = os.environ.get("AWS_REGION", "ap-northeast-2")
-# perf 전용 모델(PERF_BEDROCK_MODEL_ID) 우선 — DBAOps의 BEDROCK_MODEL_ID(opus)와 분리.
+# perf 전용 모델(PERF_BEDROCK_MODEL_ID) 우선 — 미설정 시 BEDROCK_MODEL_ID → 기본 Opus 4.8.
 BEDROCK_MODEL_ID = os.environ.get("PERF_BEDROCK_MODEL_ID") or os.environ.get(
-    "BEDROCK_MODEL_ID", "global.anthropic.claude-sonnet-4-5-20250929-v1:0")
+    "BEDROCK_MODEL_ID", "global.anthropic.claude-opus-4-8")
 OPS_A2A_URL = os.environ.get("OPS_A2A_URL", "http://127.0.0.1:8080")
 ENABLE_A2A = os.environ.get("ENABLE_A2A", "1") == "1"
 ENABLE_VALIDATION = os.environ.get("PERF_VALIDATION", "1") == "1"
@@ -175,8 +176,14 @@ Structure (omit sections that don't apply):
 ## 발견 사항
 ## 권고 (인덱스/쿼리 개선 — CREATE INDEX 문 등 그대로 유지)
 ## 참고 (도구 제약, Query Store 상태, DBAOps 인용 출처 등)
+CRITICAL: if the answer contains ```json-chart ...``` fenced blocks, copy them into the
+report VERBATIM — same fence tag `json-chart`, same JSON, do not rename to `json`,
+do not drop them (the UI renders these into chart images).
 Keep it concise. If the analyst's answer is already short (a greeting or one-liner),
 just return it unchanged."""
+
+# report 재작성에서 json-chart 펜스가 유실/변형될 때 원본에서 복구하기 위한 패턴
+_CHART_FENCE = re.compile(r"```json-chart\s*\n.*?\n```", re.DOTALL)
 
 
 # ───────────────────── State & 노드 ─────────────────────
@@ -254,7 +261,12 @@ def build_graph(tools: list[BaseTool]):
         resp = await llm.ainvoke([SystemMessage(content=REPORTER_PROMPT),
                                   HumanMessage(content=analysis)])
         text = resp.content if isinstance(resp.content, str) else str(resp.content)
-        return {"final": text or analysis}
+        text = text or analysis
+        # 재작성 과정에서 json-chart 펜스가 빠졌으면 원본 것을 뒤에 복구
+        orig_charts = _CHART_FENCE.findall(analysis)
+        if orig_charts and not _CHART_FENCE.search(text):
+            text = text + "\n\n" + "\n\n".join(orig_charts)
+        return {"final": text}
 
     def route(state: PerfState) -> Literal["revise", "report"]:
         if state["verdict"] == "FAIL" and not state.get("revised"):
