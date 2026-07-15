@@ -29,7 +29,7 @@ SUPERVISORS: list[dict] = [
         "input_hint":     "주요 입력: 시간 범위 + 자연어 질문",
         "deliverable":    "분류 + 발견 사실(인용 포함) + 가설(hedging) + 권고",
         "example":        "예: 'Aurora 최근 1시간 어디서 병목이 났는지 메트릭/로그/PI 종합해서 분석'",
-        "mode":           "single",
+        "mode":           "auto",   # LLM 라우터 — 보고서 요청이면 pipeline, 아니면 single
         "domain":         None,
     },
 ]
